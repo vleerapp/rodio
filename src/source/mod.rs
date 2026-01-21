@@ -9,6 +9,9 @@ use crate::{
     math, Float, Sample,
 };
 
+#[cfg(feature = "dither")]
+use crate::BitDepth;
+
 use dasp_sample::FromSample;
 
 pub use self::agc::{AutomaticGainControl, AutomaticGainControlSettings};
@@ -34,6 +37,7 @@ pub use self::pausable::Pausable;
 pub use self::periodic::PeriodicAccess;
 pub use self::position::TrackPosition;
 pub use self::repeat::Repeat;
+pub use self::resample::{Resample, ResampleConfig};
 pub use self::sawtooth::SawtoothWave;
 pub use self::signal_generator::{Function, GeneratorFunction, SignalGenerator};
 pub use self::sine::SineWave;
@@ -71,6 +75,7 @@ mod pausable;
 mod periodic;
 mod position;
 mod repeat;
+pub mod resample;
 mod sawtooth;
 mod signal_generator;
 mod sine;
@@ -730,9 +735,33 @@ pub trait Source: Iterator<Item = Sample> {
         distortion::distortion(self, gain, threshold)
     }
 
-    // There is no `can_seek()` method as it is impossible to use correctly. Between
-    // checking if a source supports seeking and actually seeking the sink can
-    // switch to a new source.
+    /// Resamples this source to a different sample rate.
+    ///
+    /// See the [`resample`] module documentation for detailed information about resampling
+    /// algorithms and quality presets.
+    ///
+    /// # Quality Presets
+    ///
+    /// - **Fast**: Lower quality, lower CPU usage, lower latency
+    /// - **Balanced**: Good quality, moderate CPU usage (default)
+    /// - **Accurate**: Best quality, higher CPU usage
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rodio::SampleRate;
+    /// use rodio::source::{SineWave, Source, ResampleConfig};
+    ///
+    /// let source = SineWave::new(440.0);
+    /// let resampled = source.resample(SampleRate::new(96000).unwrap(), ResampleConfig::balanced());
+    /// ```
+    #[inline]
+    fn resample(self, target_rate: SampleRate, config: ResampleConfig) -> Resample<Self>
+    where
+        Self: Sized,
+    {
+        Resample::new(self, target_rate, config)
+    }
 
     /// Attempts to seek to a given position in the current source.
     ///
@@ -858,6 +887,24 @@ pub(crate) fn padding_samples_needed(
         channels.get() as usize - samples_in_current_frame
     } else {
         0
+    }
+}
+
+/// Resets span tracking state after a seek operation.
+#[inline]
+pub(crate) fn reset_seek_span_tracking(
+    samples_counted: &mut usize,
+    cached_span_len: &mut Option<usize>,
+    pos: Duration,
+    input_span_len: Option<usize>,
+) {
+    *samples_counted = 0;
+    if pos == Duration::ZERO {
+        // Set span-counting mode when seeking to start
+        *cached_span_len = input_span_len;
+    } else {
+        // Set detection mode for arbitrary positions
+        *cached_span_len = None;
     }
 }
 
