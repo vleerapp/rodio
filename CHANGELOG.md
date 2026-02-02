@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All sources now implement `Iterator::size_hint()`.
 - `Chirp` now implements `try_seek`.
 - Added `DEFAULT_SAMPLE_RATE` set to match `cpal::SAMPLE_RATE_48K`.
+- Added `Resample` source for high-quality sample rate conversion.
 
 ### Changed
 
@@ -125,6 +126,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `cpal` to v0.17.
 - Clarified `Source::current_span_len()` contract documentation.
 - Improved queue, mixer and sample rate conversion performance.
+- `SampleRateConverter` uses the new `Resample` source for better quality.
 
 ## Version [0.21.1] (2025-07-14)
 
