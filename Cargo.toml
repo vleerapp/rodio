@@ -51,6 +51,8 @@ noise = ["rand", "rand_distr"]
 wasm-bindgen = ["cpal/wasm-bindgen"]
 
 # Base symphonia feature (doesn't enable any codecs)
+# A feature with this name is created implicitly due to other features that reference `symphonia/xxx`
+# but we need to make it explicit here so other features can reference it.
 symphonia = ["dep:symphonia"]
 
 # To decode an audio source with Rodio, you need to enable the appropriate features for *both* the
