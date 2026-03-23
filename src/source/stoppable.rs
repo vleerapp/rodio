@@ -66,13 +66,19 @@ where
     }
 }
 
+impl<I> ExactSizeIterator for Stoppable<I> where I: Source + ExactSizeIterator {}
+
 impl<I> Source for Stoppable<I>
 where
     I: Source,
 {
     #[inline]
     fn current_span_len(&self) -> Option<usize> {
-        self.input.current_span_len()
+        if self.stopped {
+            Some(0)
+        } else {
+            self.input.current_span_len()
+        }
     }
 
     #[inline]

@@ -76,13 +76,19 @@ where
     }
 }
 
+impl<I> ExactSizeIterator for Skippable<I> where I: Source + ExactSizeIterator {}
+
 impl<I> Source for Skippable<I>
 where
     I: Source,
 {
     #[inline]
     fn current_span_len(&self) -> Option<usize> {
-        self.input.current_span_len()
+        if self.do_skip {
+            Some(0)
+        } else {
+            self.input.current_span_len()
+        }
     }
 
     #[inline]
