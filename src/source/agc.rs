@@ -587,7 +587,10 @@ where
         let rms = self.update_rms(sample_value);
 
         // Compute the gain adjustment required to reach the adjusted target level
-        let rms_gain = div_or_fallback(target_level, rms, 1.0);
+        // When rms is 0.0 (silence), we fall back to current_gain as the default
+        // This keeps the gain stable during silence without any hard reset
+        // The gain will only change gradually when peaks occur or signal returns
+        let rms_gain = div_or_fallback(target_level, rms, self.current_gain);
 
         // Calculate gain adjustments based on peak levels
         // We divide target_level by peak_level to find the gain multiplier needed
