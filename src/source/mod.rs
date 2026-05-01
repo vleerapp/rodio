@@ -438,6 +438,7 @@ pub trait Source: Iterator<Item = Sample> {
             attack_time_limited,
             release_time_limited,
             agc_settings.absolute_max_gain,
+            agc_settings.peak_tracking_window,
         )
     }
 

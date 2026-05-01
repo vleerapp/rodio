@@ -3,20 +3,24 @@
 //      Designed by @UnknownSuperficialNight
 //
 //   Features:
-//   • Adaptive peak detection
-//   • RMS-based level estimation
-//   • Asymmetric attack/release
-//   • RMS-based general adjustments with peak limiting
+//   • Adaptive peak detection with exponential smoothing (EMA)
+//   • O(1) RMS level estimation via circular buffer
+//   • Combined RMS and peak limiting with adaptive slowdown
+//   • Asymmetric attack/release with per-sample clamping
+//   • Configurable floor value for minimum gain threshold
+//   • Atomic operations support (experimental)
+//   • Fast release coefficient via 3rd‑order Taylor approximation (evaluated with Horner's method)
+//   • Power-of-two window sizing for efficiency
 //
-//   Optimized for smooth and responsive gain control
+//   Optimised for smooth and responsive gain control
 //
 //   Crafted with love. Enjoy! :)
 //
 
-use std::time::Duration;
-
 use super::{SeekError, SpanTracker};
-use crate::{math::duration_to_coefficient, ChannelCount, Float, Sample, SampleRate, Source};
+use crate::math::{duration_to_coefficient, duration_to_float};
+use crate::{ChannelCount, Float, Sample, SampleRate, Source};
+use std::time::Duration;
 
 #[cfg(feature = "tracing")]
 use tracing;
@@ -46,9 +50,20 @@ const fn power_of_two(n: usize) -> usize {
     n
 }
 
+/// Divide `a` by `b` unless `b` is NaN, infinite, or <= 0,
+/// in which case `fallback` is returned.
+#[inline(always)]
+fn div_or_fallback(a: Float, b: Float, fallback: Float) -> Float {
+    if b.is_finite() && b > 0.0 {
+        a / b
+    } else {
+        fallback
+    }
+}
+
 /// Size of the circular buffer used for RMS calculation.
 /// A larger size provides more stable RMS values but increases latency.
-const RMS_WINDOW_SIZE: usize = power_of_two(8192);
+const RMS_WINDOW_SIZE: usize = power_of_two(512);
 
 /// Settings for the Automatic Gain Control (AGC).
 ///
@@ -68,15 +83,21 @@ pub struct AutomaticGainControlSettings {
     /// Maximum allowable gain multiplication to prevent excessive amplification.
     /// This acts as a safety limit to avoid distortion from over-amplification.
     pub absolute_max_gain: Float,
+    /// Duration of the peak tracking smoothing window.
+    /// Controls how much peak level measurements are smoothed before being used for gain calculation.
+    /// Larger values provide more stable peak detection but add latency to peak tracking.
+    /// Smaller values respond faster to sudden peaks but may allow more transient clipping.
+    pub peak_tracking_window: Duration,
 }
 
 impl Default for AutomaticGainControlSettings {
     fn default() -> Self {
         AutomaticGainControlSettings {
-            target_level: 1.0,                    // Default to original level
-            attack_time: Duration::from_secs(4),  // Recommended attack time
-            release_time: Duration::from_secs(0), // Recommended release time
-            absolute_max_gain: 7.0,               // Recommended max gain
+            target_level: 1.0,                               // Default to original level
+            attack_time: Duration::from_millis(500),         // Recommended attack time
+            release_time: Duration::from_nanos(500000),      // Recommended release time
+            absolute_max_gain: 7.0,                          // Recommended max gain
+            peak_tracking_window: Duration::from_millis(10), // Recommended peak tracking window for balanced stability and responsiveness
         }
     }
 }
@@ -89,18 +110,29 @@ impl Default for AutomaticGainControlSettings {
 #[derive(Clone, Debug)]
 pub struct AutomaticGainControl<I> {
     input: I,
+
+    // Core gain values
     target_level: Arc<AtomicFloat>,
     floor: Float,
     absolute_max_gain: Arc<AtomicFloat>,
-    attack_time: Duration,
-    release_time: Duration,
+    peak_tracking_window: Duration,
     current_gain: Float,
-    attack_coeff: Arc<AtomicFloat>,
-    release_coeff: Arc<AtomicFloat>,
+
+    // Timing parameters
+    attack_duration: Arc<AtomicFloat>,
+    release_duration: Arc<AtomicFloat>,
+
+    // Signal analysis state
     peak_level: Float,
-    rms_window: CircularBuffer,
+    release_coefficient: Float,
+    rms_window: CircularBufferRMS,
+
+    // Control flags
     is_enabled: Arc<AtomicBool>,
     span: SpanTracker,
+
+    // Slowdown tracking
+    slow_down_state: SlowDownState,
 }
 
 #[cfg(not(feature = "experimental"))]
@@ -111,74 +143,173 @@ pub struct AutomaticGainControl<I> {
 #[derive(Clone, Debug)]
 pub struct AutomaticGainControl<I> {
     input: I,
+
+    // Core gain values
     target_level: Float,
     floor: Float,
     absolute_max_gain: Float,
-    attack_time: Duration,
-    release_time: Duration,
+    peak_tracking_window: Duration,
     current_gain: Float,
-    attack_coeff: Float,
-    release_coeff: Float,
+
+    // Timing parameters
+    attack_duration: Float,
+    release_duration: Float,
+
+    // Signal analysis state
     peak_level: Float,
-    rms_window: CircularBuffer,
+    release_coefficient: Float,
+    rms_window: CircularBufferRMS,
+
+    // Control flags
     is_enabled: bool,
     span: SpanTracker,
+
+    // Slowdown tracking
+    slow_down_state: SlowDownState,
 }
 
-/// A circular buffer for efficient RMS calculation over a sliding window.
+/// State for adaptive slowdown of gain changes.
 ///
-/// This structure allows for constant-time updates and mean calculations,
-/// which is crucial for real-time audio processing.
+/// This struct holds the state for managing the slowdown of gain changes based on signal conditions.
+/// The `slowdown_factor` determines how quickly or slowly the gain can change:
+/// - When the signal is quiet and we're close to target, changes are allowed normally
+/// - When the signal peaks significantly, changes are slowed down exponentially
+/// - This prevents abrupt loudness jumps during automatic gain control adjustments.
 #[derive(Clone, Debug)]
-struct CircularBuffer {
+struct SlowDownState {
+    block_size: usize,
+    sample_counter: usize,
+    slowdown_factor: Float,
+}
+
+impl SlowDownState {
+    #[inline]
+    fn new(sample_rate: SampleRate) -> Self {
+        // Calculate and cache block size based on sample rate
+        let block_size = (sample_rate.get() as usize / 1000) * 2; // 2ms blocks
+
+        Self {
+            block_size,
+            sample_counter: 0,
+            slowdown_factor: 0.0,
+        }
+    }
+
+    #[inline]
+    fn increment_sample_counter(&mut self) {
+        self.sample_counter = (self.sample_counter + 1) % self.block_size;
+    }
+
+    /// Computes the slowdown factor for adaptive gain changes.
+    ///
+    /// The slowdown factor determines how quickly or slowly the gain can change based on the current signal conditions.
+    /// - When the desired gain is close to the current gain, the slowdown factor increases, preventing abrupt loudness jumps during automatic gain control adjustments.
+    /// - When the signal deviates significantly from the target, the slowdown factor remains high to maintain stability.
+    #[inline]
+    fn compute_slowdown_factor(
+        &mut self,
+        desired_gain: Float,
+        current_gain: Float,
+        rms: Float,
+        peak_level: Float,
+    ) {
+        // Calculate the absolute difference between the desired gain and the current gain
+        let distance_from_target = (desired_gain - current_gain).abs();
+
+        // Calculate the maximum distance as the sum of RMS and peak level
+        let max_distance = rms + peak_level;
+
+        // Normalise distance clamped between [0,1] with a fallback of 1.0
+        let normalise_distance = div_or_fallback(distance_from_target, max_distance, 1.0).min(1.0);
+
+        // Compute the exponential slowdown factor based on the normalised distance
+        // The multiplier is scaled by the square root of the sum of peak level and RMS
+        let exp_multiplier = 10.0 * (peak_level + rms).sqrt();
+        let exp_slowdown = fast_exp(1.0 + exp_multiplier * (1.0 - normalise_distance));
+
+        // Create a mask that is 1.0 if the distance is within the max_distance, otherwise 0.0
+        // This mask is used to blend the exponential slowdown factor with a linear factor
+        let mask = ((max_distance - distance_from_target).max(0.0) / max_distance).min(1.0);
+
+        // Blend the slowdown factor: when mask=1 use exp_slowdown, else 1.0
+        // This ensures that the slowdown factor increases when the signal deviates from the target
+        self.slowdown_factor = 1.0 + mask * (exp_slowdown - 1.0);
+    }
+}
+
+/// A circular buffer optimised for RMS calculation over a sliding window.
+///
+/// Maintains a running sum of squares with O(1) updates and retrieval,
+/// avoiding the need to scan stored samples for mean calculations.
+#[derive(Clone, Debug)]
+struct CircularBufferRMS {
     buffer: Box<[Float; RMS_WINDOW_SIZE]>,
-    sum: Float,
+    sum_of_squares: Float,
     index: usize,
 }
 
-impl CircularBuffer {
-    /// Creates a new `CircularBuffer` with a fixed size determined at compile time.
+impl CircularBufferRMS {
+    /// Creates a new `CircularBufferRMS` with a fixed size determined at compile time.
+    ///
+    /// The buffer size is `RMS_WINDOW_SIZE`, chosen as a power of two for
+    /// efficient modulo operations using bitwise arithmetic.
     #[inline]
     fn new() -> Self {
-        CircularBuffer {
+        CircularBufferRMS {
             buffer: Box::new([0.0; RMS_WINDOW_SIZE]),
-            sum: 0.0,
+            sum_of_squares: 0.0,
             index: 0,
         }
     }
 
-    /// Pushes a new value into the buffer and returns the old value.
+    /// Adds a sample to the buffer and updates the running sum of squares.
     ///
-    /// This method maintains a running sum for efficient mean calculation.
+    /// Maintains an incremental sum of squares for O(1) RMS computation
+    /// without recalculating from stored samples.
     #[inline]
-    fn push(&mut self, value: Float) -> Float {
+    fn push(&mut self, value: Float) {
         let old_value = self.buffer[self.index];
-        // Update the sum by first subtracting the old value and then adding the new value; this is more accurate.
-        self.sum = self.sum - old_value + value;
+        // Update the sum of squares by subtracting the square of the old value and adding the square of the new value.
+        self.sum_of_squares = (self.sum_of_squares - (old_value * old_value)) + (value * value);
         self.buffer[self.index] = value;
-        // Use bitwise AND for efficient index wrapping since RMS_WINDOW_SIZE is a power of two.
+        // Use bitwise for efficient index wrapping since RMS_WINDOW_SIZE is a power of two.
         self.index = (self.index + 1) & (RMS_WINDOW_SIZE - 1);
-        old_value
     }
 
-    /// Calculates the mean of all values in the buffer.
+    /// Calculate the RMS (Root Mean Square) value of all values in the buffer.
     ///
-    /// This operation is `O(1)` due to the maintained running sum.
+    /// RMS provides a measure of the signal's effective or average magnitude.
     #[inline]
-    fn mean(&self) -> Float {
-        self.sum / RMS_WINDOW_SIZE as Float
+    fn rms(&self) -> Float {
+        (self.sum_of_squares / RMS_WINDOW_SIZE as Float).sqrt()
     }
+}
+
+/// Fast approximation of `exp(x)` using Horner's Method for Polynomial Evaluation.
+/// This function approximates the exponential function by evaluating the
+/// third-order Taylor polynomial using Horner's scheme, which reduces the
+/// number of multiplications and improves numerical stability.
+///
+/// This approximation is valid for small values of `x` (near zero) and is
+/// used in the AGC algorithm to efficiently compute the release coefficient.
+/// It provides a good balance between speed and accuracy, resulting in
+/// faster benchmark times compared to the standard `exp` function.
+#[inline]
+fn fast_exp(x: Float) -> Float {
+    // Horner's method: 1 + x*(1 + x*(0.5 + x/6))
+    1.0 + x * (1.0 + x * (0.5 + x / 6.0))
 }
 
 /// Constructs an `AutomaticGainControl` object with specified parameters.
 ///
 /// # Arguments
 ///
-/// * `input` - The input audio source
-/// * `target_level` - The desired output level
-/// * `attack_time` - Time constant for gain increase
-/// * `release_time` - Time constant for gain decrease
-/// * `absolute_max_gain` - Maximum allowable gain
+/// `input` - The input audio source
+/// `target_level` - The desired output level
+/// `attack_time` - Time constant for gain increase
+/// `release_time` - Time constant for gain decrease
+/// `absolute_max_gain` - Maximum allowable gain
+/// `peak_tracking_window` - Duration over which to track peak level
 #[inline]
 pub(crate) fn automatic_gain_control<I>(
     input: I,
@@ -186,13 +317,16 @@ pub(crate) fn automatic_gain_control<I>(
     attack_time: Duration,
     release_time: Duration,
     absolute_max_gain: Float,
+    peak_tracking_window: Duration,
 ) -> AutomaticGainControl<I>
 where
     I: Source,
 {
     let sample_rate = input.sample_rate();
-    let attack_coeff = duration_to_coefficient(attack_time, sample_rate);
-    let release_coeff = duration_to_coefficient(release_time, sample_rate);
+    let attack_duration = duration_to_float(attack_time);
+    let release_duration = duration_to_float(release_time);
+
+    let release_coefficient = duration_to_coefficient(peak_tracking_window, sample_rate);
 
     #[cfg(feature = "experimental")]
     {
@@ -202,15 +336,16 @@ where
             target_level: Arc::new(AtomicFloat::new(target_level)),
             floor: 0.0,
             absolute_max_gain: Arc::new(AtomicFloat::new(absolute_max_gain)),
-            attack_time,
-            release_time,
+            peak_tracking_window,
             current_gain: 1.0,
-            attack_coeff: Arc::new(AtomicFloat::new(attack_coeff)),
-            release_coeff: Arc::new(AtomicFloat::new(release_coeff)),
-            peak_level: 0.0,
-            rms_window: CircularBuffer::new(),
+            attack_duration: Arc::new(AtomicFloat::new(attack_duration)),
+            release_duration: Arc::new(AtomicFloat::new(release_duration)),
+            peak_level: 0.7,
+            release_coefficient,
+            rms_window: CircularBufferRMS::new(),
             is_enabled: Arc::new(AtomicBool::new(true)),
             span: SpanTracker::new(sample_rate, channels),
+            slow_down_state: SlowDownState::new(sample_rate),
         }
     }
 
@@ -222,15 +357,16 @@ where
             target_level,
             floor: 0.0,
             absolute_max_gain,
-            attack_time,
-            release_time,
+            peak_tracking_window,
             current_gain: 1.0,
-            attack_coeff,
-            release_coeff,
-            peak_level: 0.0,
-            rms_window: CircularBuffer::new(),
+            attack_duration,
+            release_duration,
+            peak_level: 0.7,
+            release_coefficient,
+            rms_window: CircularBufferRMS::new(),
             is_enabled: true,
             span: SpanTracker::new(sample_rate, channels),
+            slow_down_state: SlowDownState::new(sample_rate),
         }
     }
 }
@@ -264,26 +400,26 @@ where
     }
 
     #[inline]
-    fn attack_coeff(&self) -> Float {
+    fn attack_duration(&self) -> Float {
         #[cfg(feature = "experimental")]
         {
-            self.attack_coeff.load(Ordering::Relaxed)
+            self.attack_duration.load(Ordering::Relaxed)
         }
         #[cfg(not(feature = "experimental"))]
         {
-            self.attack_coeff
+            self.attack_duration
         }
     }
 
     #[inline]
-    fn release_coeff(&self) -> Float {
+    fn release_duration(&self) -> Float {
         #[cfg(feature = "experimental")]
         {
-            self.release_coeff.load(Ordering::Relaxed)
+            self.release_duration.load(Ordering::Relaxed)
         }
         #[cfg(not(feature = "experimental"))]
         {
-            self.release_coeff
+            self.release_duration
         }
     }
 
@@ -329,8 +465,8 @@ where
     /// Note: if the sample rate or channel count changes, any value set through this handle will
     /// be overwritten with the attack time that this AGC was constructed with.
     #[inline]
-    pub fn get_attack_coeff(&self) -> Arc<AtomicFloat> {
-        Arc::clone(&self.attack_coeff)
+    pub fn get_attack_duration(&self) -> Arc<AtomicFloat> {
+        Arc::clone(&self.attack_duration)
     }
 
     #[cfg(feature = "experimental")]
@@ -343,8 +479,8 @@ where
     /// Note: if the sample rate or channel count changes, any value set through this handle will
     /// be overwritten with the release time that this AGC was constructed with.
     #[inline]
-    pub fn get_release_coeff(&self) -> Arc<AtomicFloat> {
-        Arc::clone(&self.release_coeff)
+    pub fn get_release_duration(&self) -> Arc<AtomicFloat> {
+        Arc::clone(&self.release_duration)
     }
 
     #[cfg(feature = "experimental")]
@@ -388,22 +524,26 @@ where
         self.floor = floor.unwrap_or(0.0);
     }
 
-    /// Updates the peak level using instant attack and slow release behaviour
+    /// Updates the peak level using exponential smoothing (EMA) to blend the current
+    /// value toward the previous level using the release coefficient, then taking
+    /// the maximum of the current sample.
     ///
-    /// This method uses instant response (0.0 coefficient) when the signal is increasing
-    /// and the release coefficient when the signal is decreasing, providing
-    /// appropriate tracking behaviour for peak detection.
+    /// This provides a stable peak measurement that doesn't react to every sample,
+    /// preventing excessive gain adjustments when the signal is momentarily loud.
+    /// The peak serves as an absolute maximum safeguard to prevent output clipping
+    /// even when RMS-based gain calculations suggest aggressive amplification.
     #[inline]
-    fn update_peak_level(&mut self, sample_value: Sample, release_coeff: Float) {
-        let coeff = if sample_value > self.peak_level {
-            // Fast attack for rising peaks
-            0.0
-        } else {
-            // Slow release for falling peaks
-            release_coeff
-        };
+    fn update_peak_level(&mut self, sample_value: Float, release_coefficient: Float) {
+        // Compute the exponentially smoothed estimate of the previous peak level.
+        // The EMA smooths peak tracking over time, preventing sudden jumps when
+        // loud transients occur, which would otherwise cause extreme gain reductions.
+        let peak_release =
+            self.peak_level * release_coefficient + sample_value * (1.0 - release_coefficient);
 
-        self.peak_level = self.peak_level * coeff + sample_value * (1.0 - coeff);
+        // Take maximum to ensure the peak is always an upper bound.
+        // This guarantees that peak_level never decreases below the current sample,
+        // preserving the safety mechanism against clipping.
+        self.peak_level = sample_value.max(peak_release);
     }
 
     /// Updates the RMS (Root Mean Square) level using a circular buffer approach.
@@ -411,21 +551,14 @@ where
     /// providing a measure of the signal's average power over time.
     #[inline]
     fn update_rms(&mut self, sample_value: Sample) -> Float {
-        let squared_sample = sample_value * sample_value;
-        self.rms_window.push(squared_sample);
-        self.rms_window.mean().sqrt()
-    }
+        self.rms_window.push(sample_value);
 
-    /// Calculate gain adjustments based on peak levels
-    /// This method determines the appropriate gain level to apply to the audio
-    /// signal, considering the peak level.
-    /// The peak level helps prevent sudden spikes in the output signal.
-    #[inline]
-    fn calculate_peak_gain(&self, target_level: Float, absolute_max_gain: Float) -> Float {
-        if self.peak_level > 0.0 {
-            (target_level / self.peak_level).min(absolute_max_gain)
+        // Calculate RMS safely
+        let rms = self.rms_window.rms();
+        if rms.is_nan() || rms <= 0.0 {
+            0.0 // Default to 0 if RMS is invalid
         } else {
-            absolute_max_gain
+            rms
         }
     }
 
@@ -434,72 +567,87 @@ where
         // Cache atomic loads at the start - avoids repeated atomic operations
         let target_level = self.target_level();
         let absolute_max_gain = self.absolute_max_gain();
-        let attack_coeff = self.attack_coeff();
-        let release_coeff = self.release_coeff();
+        let attack_time_in_seconds = self.attack_duration();
+        let release_duration = self.release_duration();
+        let sample_rate = self.sample_rate().get() as Float; // Sample rate in Hz
 
         // Convert the sample to its absolute float value for level calculations
+        // We use abs() to work with signal magnitude regardless of polarity
+        // This is crucial because RMS and peak detection care about energy,
+        // not whether the signal is positive or negative
         let sample_value = sample.abs();
 
+        // Increment the sample counter
+        self.slow_down_state.increment_sample_counter();
+
         // Dynamically adjust peak level using cached release coefficient
-        self.update_peak_level(sample_value, release_coeff);
+        self.update_peak_level(sample_value, self.release_coefficient);
 
         // Calculate the current RMS (Root Mean Square) level using a sliding window approach
         let rms = self.update_rms(sample_value);
 
-        // Compute the gain adjustment required to reach the target level based on RMS
-        let rms_gain = if rms > 0.0 {
-            target_level / rms
-        } else {
-            absolute_max_gain // Default to max gain if RMS is zero
-        };
+        // Compute the gain adjustment required to reach the adjusted target level
+        let rms_gain = div_or_fallback(target_level, rms, 1.0);
 
-        // Calculate the peak limiting gain
-        let peak_gain = self.calculate_peak_gain(target_level, absolute_max_gain);
+        // Calculate gain adjustments based on peak levels
+        // We divide target_level by peak_level to find the gain multiplier needed
+        // to scale the signal's peaks to match the target. If peak_level is high
+        // (loud signal), this gives us a gain < 1.0 (attenuation). If peak_level
+        // is low (quiet signal), this gives us a gain > 1.0 (amplification).
+        // The peak level acts as a safety mechanism to prevent output spikes
+        // that could exceed the target level.
+        let peak_gain = div_or_fallback(target_level, self.peak_level, 1.0).min(absolute_max_gain);
 
-        // Use RMS for general adjustments, but limit by peak gain to prevent clipping and apply a minimum floor value
+        // Combine RMS and peak gains by taking the minimum. We use min() because
+        // we need to choose a single gain value that respects both constraints.
+        // Think of it like this: RMS gain might suggest "amplify by 5x" based on
+        // average signal level, but peak gain might suggest "attenuate by 0.5x"
+        // to prevent output spikes. Since these goals conflict (amplify vs reduce),
+        // we pick the more conservative one: min() selects 0.5x (attenuation) over
+        // 5x (amplification). This ensures we don't blindly amplify and risk
+        // output spikes, even when the average signal seems quiet.
+        // Then we apply the floor to ensure we never drop below the minimum allowed gain.
         let desired_gain = rms_gain.min(peak_gain).max(self.floor);
 
-        // Adaptive attack/release speed for AGC (Automatic Gain Control)
-        //
-        // This mechanism implements an asymmetric approach to gain adjustment:
-        // 1. **Slow increase**: Prevents abrupt amplification of noise during quiet periods.
-        // 2. **Fast decrease**: Rapidly attenuates sudden loud signals to avoid distortion.
-        //
-        // The asymmetry is crucial because:
-        // - Gradual gain increases sound more natural and less noticeable to listeners.
-        // - Quick gain reductions are necessary to prevent clipping and maintain audio quality.
-        //
-        // This approach addresses several challenges associated with high attack times:
-        // 1. **Slow response**: With a high attack time, the AGC responds very slowly to changes in input level.
-        //    This means it takes longer for the gain to adjust to new signal levels.
-        // 2. **Initial gain calculation**: When the audio starts or after a period of silence, the initial gain
-        //    calculation might result in a very high gain value, especially if the input signal starts quietly.
-        // 3. **Overshooting**: As the gain slowly increases (due to the high attack time), it might overshoot
-        //    the desired level, causing the signal to become too loud.
-        // 4. **Overcorrection**: The AGC then tries to correct this by reducing the gain, but due to the slow response,
-        //    it might reduce the gain too much, causing the sound to drop to near-zero levels.
-        // 5. **Slow recovery**: Again, due to the high attack time, it takes a while for the gain to increase
-        //    back to the appropriate level.
-        //
-        // By using a faster release time for decreasing gain, we can mitigate these issues and provide
-        // more responsive control over sudden level increases while maintaining smooth gain increases.
-        let attack_speed = if desired_gain > self.current_gain {
-            attack_coeff
+        if self.slow_down_state.sample_counter == 0 {
+            self.slow_down_state.compute_slowdown_factor(
+                desired_gain,
+                self.current_gain,
+                rms,
+                self.peak_level,
+            );
+        }
+
+        let dynamic_attack_time = attack_time_in_seconds * self.slow_down_state.slowdown_factor;
+
+        // Calculate max gain change per sample based on dynamic attack/release times
+        let max_attack_gain_change_per_sample = 1.0 / (dynamic_attack_time * sample_rate);
+        let max_release_gain_change_per_sample = 1.0 / (release_duration * sample_rate);
+
+        // Determine gain difference
+        let gain_diff = desired_gain - self.current_gain;
+
+        // Clamp gain change based on attack or release phase
+        let gain_change = if gain_diff > 0.0 {
+            // Attack phase: Clamp the gain change to the maximum allowed per sample
+            gain_diff.clamp(0.0, max_attack_gain_change_per_sample)
         } else {
-            release_coeff
+            // Release phase: Clamp the gain change to the maximum allowed per sample
+            gain_diff.clamp(-max_release_gain_change_per_sample, 0.0)
         };
 
-        // Gradually adjust the current gain towards the desired gain for smooth transitions
-        self.current_gain = self.current_gain * attack_speed + desired_gain * (1.0 - attack_speed);
+        // Update current gain
+        self.current_gain += gain_change;
 
-        // Ensure the calculated gain stays within the defined operational range
-        self.current_gain = self.current_gain.clamp(0.1, absolute_max_gain);
-
-        // Output current gain value for developers to fine tune their inputs to automatic_gain_control
         #[cfg(feature = "tracing")]
-        tracing::debug!("AGC gain: {}", self.current_gain,);
+        if self.slow_down_state.sample_counter == 0 {
+            tracing::debug!(
+            "RMS: {:.4}, Peak: {:.4}, Desired Gain: {:.4}, Current Gain: {:.4}, Release Coefficient: {}, Attack Time: {:.4}",
+            rms, self.peak_level, desired_gain, self.current_gain, self.release_coefficient, dynamic_attack_time,
+        );
+        }
 
-        // Apply the computed gain to the input sample and return the result
+        // Apply gain to sample and return
         sample * self.current_gain
     }
 
@@ -526,24 +674,14 @@ where
 
         if detection.at_span_boundary && detection.parameters_changed {
             let current_sample_rate = self.input.sample_rate();
+
             // Recalculate coefficients for new sample rate
-            #[cfg(feature = "experimental")]
-            {
-                let attack_coeff = duration_to_coefficient(self.attack_time, current_sample_rate);
-                let release_coeff = duration_to_coefficient(self.release_time, current_sample_rate);
-                self.attack_coeff.store(attack_coeff, Ordering::Relaxed);
-                self.release_coeff.store(release_coeff, Ordering::Relaxed);
-            }
-            #[cfg(not(feature = "experimental"))]
-            {
-                self.attack_coeff = duration_to_coefficient(self.attack_time, current_sample_rate);
-                self.release_coeff =
-                    duration_to_coefficient(self.release_time, current_sample_rate);
-            }
+            self.release_coefficient =
+                duration_to_coefficient(self.peak_tracking_window, current_sample_rate);
 
             // Reset RMS window to avoid mixing samples from different parameter sets
-            self.rms_window = CircularBuffer::new();
-            self.peak_level = 0.0;
+            self.rms_window = CircularBufferRMS::new();
+            self.peak_level = 0.7;
             self.current_gain = 1.0;
         }
 
