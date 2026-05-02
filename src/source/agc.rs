@@ -281,7 +281,9 @@ impl CircularBufferRMS {
     /// RMS provides a measure of the signal's effective or average magnitude.
     #[inline]
     fn rms(&self) -> Float {
-        (self.sum_of_squares / RMS_WINDOW_SIZE as Float).sqrt()
+        (self.sum_of_squares / RMS_WINDOW_SIZE as Float)
+            .sqrt()
+            .min(1.0)
     }
 }
 
