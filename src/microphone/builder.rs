@@ -515,26 +515,6 @@ where
             config.buffer_size = cpal::BufferSize::Fixed(size)
         })
     }
-
-    /// Set polling interval for the microphone iterator
-    ///
-    /// Lower values = lower latency but higher CPU usage
-    /// Higher values = higher latency but lower CPU usage
-    ///
-    /// Recommended values:
-    /// - Real-time effects: 1-2ms
-    /// - Interactive applications: 5ms (default)
-    /// - Recording/batch processing: 10-20ms
-    pub fn poll_interval(&self, interval: Duration) -> Self {
-        MicrophoneBuilder {
-            device: self.device.clone(),
-            config: self.config,
-            error_callback: self.error_callback.clone(),
-            poll_interval: interval,
-            device_set: PhantomData,
-            config_set: PhantomData,
-        }
-    }
 }
 
 impl<Device, E> MicrophoneBuilder<Device, ConfigIsSet, E>
@@ -581,7 +561,6 @@ where
         Microphone::open(
             self.device.as_ref().expect("DeviceIsSet").0.clone(),
             *self.config.as_ref().expect("ConfigIsSet"),
-            self.poll_interval,
             self.error_callback.clone(),
         )
     }
