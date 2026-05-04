@@ -187,8 +187,8 @@
 
 #[cfg(feature = "playback")]
 pub use cpal::{
-    self, traits::DeviceTrait, Device, Devices, DevicesError, InputDevices, OutputDevices,
-    SupportedStreamConfig,
+    self, traits::DeviceTrait, Device, Devices, Error as CpalError, ErrorKind as CpalErrorKind,
+    InputDevices, OutputDevices, SupportedStreamConfig,
 };
 
 mod common;
@@ -215,7 +215,7 @@ pub mod queue;
 pub mod source;
 pub mod static_buffer;
 
-pub use crate::common::{BitDepth, ChannelCount, Float, Sample, SampleRate};
+pub use crate::common::{BitDepth, ChannelCount, Float, Sample, SampleRate, DEFAULT_SAMPLE_RATE};
 pub use crate::decoder::Decoder;
 #[cfg(feature = "experimental")]
 pub use crate::fixed_source::FixedSource;
