@@ -1,4 +1,4 @@
-use std::{fmt::Debug, marker::PhantomData, time::Duration};
+use std::{fmt::Debug, marker::PhantomData};
 
 use cpal::{
     traits::{DeviceTrait, HostTrait},
@@ -62,7 +62,6 @@ where
 {
     device: Option<(cpal::Device, Vec<SupportedStreamConfigRange>)>,
     config: Option<super::config::InputConfig>,
-    poll_interval: Duration,
     error_callback: E,
 
     device_set: PhantomData<Device>,
@@ -94,7 +93,6 @@ impl Default for MicrophoneBuilder<DeviceNotSet, ConfigNotSet> {
             device: None,
             config: None,
             error_callback: default_error_callback,
-            poll_interval: Duration::from_millis(5),
 
             device_set: PhantomData,
             config_set: PhantomData,
@@ -153,7 +151,6 @@ where
             device: Some((device, supported_configs)),
             config: self.config,
             error_callback: self.error_callback.clone(),
-            poll_interval: self.poll_interval,
             device_set: PhantomData,
             config_set: PhantomData,
         })
@@ -185,7 +182,6 @@ where
             device: Some((default_device, supported_configs)),
             config: self.config,
             error_callback: self.error_callback.clone(),
-            poll_interval: self.poll_interval,
             device_set: PhantomData,
             config_set: PhantomData,
         })
@@ -234,7 +230,6 @@ where
             device: self.device.clone(),
             config: Some(config),
             error_callback: self.error_callback.clone(),
-            poll_interval: self.poll_interval,
             device_set: PhantomData,
             config_set: PhantomData,
         })
@@ -267,7 +262,6 @@ where
             device: self.device.clone(),
             config: Some(config),
             error_callback: self.error_callback.clone(),
-            poll_interval: self.poll_interval,
             device_set: PhantomData,
             config_set: PhantomData,
         })
@@ -322,7 +316,6 @@ where
             device: self.device.clone(),
             config: Some(new_config),
             error_callback: self.error_callback.clone(),
-            poll_interval: self.poll_interval,
             device_set: PhantomData,
             config_set: PhantomData,
         })
@@ -374,7 +367,6 @@ where
             device: self.device.clone(),
             config: Some(final_config),
             error_callback: self.error_callback.clone(),
-            poll_interval: self.poll_interval,
             device_set: PhantomData,
             config_set: PhantomData,
         }
@@ -403,7 +395,6 @@ where
             device: self.device.clone(),
             config: Some(new_config),
             error_callback: self.error_callback.clone(),
-            poll_interval: self.poll_interval,
             device_set: PhantomData,
             config_set: PhantomData,
         })
@@ -466,7 +457,6 @@ where
             device: self.device.clone(),
             config: Some(new_config),
             error_callback: self.error_callback.clone(),
-            poll_interval: self.poll_interval,
             device_set: PhantomData,
             config_set: PhantomData,
         })
