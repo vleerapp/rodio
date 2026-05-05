@@ -48,15 +48,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     )?;
     println!("Plots saved to microphone_intervals.png");
 
-    /*
-    let csv_file_path = "microphone_intervals.csv";
-    let mut csv_file = std::fs::File::create(csv_file_path)?;
-    use std::io::Write;
-    for dt in &intervals {
-        writeln!(csv_file, "{}", dt.as_nanos())?;
-    }
-    println!("Saved intervals to {}", csv_file_path);
-    */
     Ok(())
 }
 
