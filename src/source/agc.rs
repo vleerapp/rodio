@@ -63,7 +63,7 @@ fn div_or_fallback(a: Float, b: Float, fallback: Float) -> Float {
 
 /// Size of the circular buffer used for RMS calculation.
 /// A larger size provides more stable RMS values but increases latency.
-const RMS_WINDOW_SIZE: usize = power_of_two(512);
+const RMS_WINDOW_SIZE: usize = power_of_two(1024);
 
 /// Settings for the Automatic Gain Control (AGC).
 ///
