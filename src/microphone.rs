@@ -275,7 +275,7 @@ impl Microphone {
                         config.stream_config(),
                         move |data, _info| {
                             for sample in SampleTypeConverter::<_, Sample>::new(data.into_iter().copied()) {
-                                let _skip_if_player_is_behind = tx.send(sample).is_err();
+                                let _skip_if_player_is_behind = tx.try_send(sample).is_err();
                             }
                         },
                         error_callback,
