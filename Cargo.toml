@@ -144,7 +144,6 @@ approx = "0.5.1"
 divan = "0.1.14"
 inquire = "0.9.3"
 symphonia-adapter-fdk-aac = "0.1"
-kuva = { version = "0.1.0", features = ["png"] }
 
 [[bench]]
 name = "effects"
