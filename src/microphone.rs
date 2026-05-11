@@ -100,8 +100,9 @@
 
 use core::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::Arc;
-use std::{thread, time::Duration};
+use std::time::Duration;
 
 use crate::common::assert_error_traits;
 use crate::conversions::SampleTypeConverter;
@@ -116,7 +117,6 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device,
 };
-use rtrb::RingBuffer;
 
 /// Error that can occur when we can not list the input devices
 #[derive(Debug, thiserror::Error, Clone)]
@@ -184,10 +184,8 @@ pub fn available_inputs() -> Result<Vec<Input>, ListError> {
 /// A microphone input stream that can be used as `Source`.
 pub struct Microphone {
     _stream_handle: cpal::Stream,
-    buffer: rtrb::Consumer<Sample>,
+    receiver: mpsc::Receiver<Sample>,
     config: InputConfig,
-    poll_interval: Duration,
-    error_occurred: Arc<AtomicBool>,
 }
 
 impl Source for Microphone {
@@ -227,19 +225,11 @@ impl Iterator for Microphone {
     type Item = Sample;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Ok(sample) = self.buffer.pop() {
-                return Some(sample);
-            } else if self.error_occurred.load(Ordering::Relaxed) {
-                return None;
-            } else {
-                thread::sleep(self.poll_interval)
-            }
-        }
+        self.receiver.iter().next()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.buffer.slots(), None)
+        self.receiver.iter().size_hint()
     }
 }
 
@@ -267,7 +257,7 @@ impl Microphone {
         let timeout = Some(Duration::from_millis(100));
         let hundred_ms_of_samples =
             config.channel_count.get() as u32 * config.sample_rate.get() / 10;
-        let (mut tx, rx) = RingBuffer::<Sample>::new(hundred_ms_of_samples as usize);
+        let (tx, rx) = mpsc::sync_channel::<Sample>(hundred_ms_of_samples as usize);
         let error_occurred = Arc::new(AtomicBool::new(false));
         let error_callback = {
             let error_occurred = error_occurred.clone();
@@ -285,7 +275,7 @@ impl Microphone {
                         config.stream_config(),
                         move |data, _info| {
                             for sample in SampleTypeConverter::<_, Sample>::new(data.into_iter().copied()) {
-                                let _skip_if_player_is_behind = tx.push(sample);
+                                let _skip_if_player_is_behind = tx.try_send(sample).is_err();
                             }
                         },
                         error_callback,
@@ -316,10 +306,8 @@ impl Microphone {
 
         Ok(Microphone {
             _stream_handle: stream,
-            buffer: rx,
+            receiver: rx,
             config,
-            poll_interval: Duration::from_millis(5),
-            error_occurred,
         })
     }
 
