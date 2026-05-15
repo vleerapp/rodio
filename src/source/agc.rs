@@ -95,7 +95,7 @@ impl Default for AutomaticGainControlSettings {
         AutomaticGainControlSettings {
             target_level: 1.0,                               // Default to original level
             attack_time: Duration::from_millis(500),         // Recommended attack time
-            release_time: Duration::from_nanos(500000),      // Recommended release time
+            release_time: Duration::from_micros(500),        // Recommended release time
             absolute_max_gain: 7.0,                          // Recommended max gain
             peak_tracking_window: Duration::from_millis(10), // Recommended peak tracking window for balanced stability and responsiveness
         }
