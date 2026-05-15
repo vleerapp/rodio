@@ -5,8 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dasp_sample::Sample as _;
-
 use crate::source::{Empty, SeekError, Source};
 use crate::Sample;
 
@@ -130,30 +128,15 @@ pub struct SourcesQueueOutput {
     silence_samples_remaining: usize,
 }
 
-/// Returns a threshold span length that ensures frame alignment.
-///
-/// Spans must end on frame boundaries (multiples of channel count) to prevent
-/// channel misalignment. Returns ~512 samples rounded to the nearest frame.
-#[inline]
-fn threshold(channels: ChannelCount) -> usize {
-    const BASE_SAMPLES: usize = 512;
-    let ch = channels.get() as usize;
-    BASE_SAMPLES.div_ceil(ch) * ch
-}
-
 impl Source for SourcesQueueOutput {
     #[inline]
     fn current_span_len(&self) -> Option<usize> {
         if !self.current.is_exhausted() {
             return self.current.current_span_len();
-        } else if self.input.keep_alive_if_empty.load(Ordering::Acquire)
-            && self.input.next_sounds.lock().unwrap().is_empty()
-        {
-            // Return what that Zero's current_span_len() will be: Some(threshold(channels)).
-            return Some(threshold(self.current.channels()));
         }
-
-        None
+        // A queue must never return None: that would cause downstream sources to miss format
+        // changes between queue items. Return a small value so boundaries are checked often.
+        Some(self.channels().get() as usize)
     }
 
     #[inline]

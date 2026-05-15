@@ -9,9 +9,6 @@ use crate::{
     math, Float, Sample,
 };
 
-#[cfg(feature = "dither")]
-use crate::BitDepth;
-
 use dasp_sample::FromSample;
 
 pub use self::agc::{AutomaticGainControl, AutomaticGainControlSettings};
