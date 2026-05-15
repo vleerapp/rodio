@@ -2,7 +2,7 @@
 
 use dasp_sample::Sample as _;
 use num_rational::Ratio;
-use rubato::Resampler;
+use rubato::{audioadapter_buffers::direct::InterleavedSlice, Resampler};
 
 use crate::source::{ChannelCount, SampleRate, Source};
 use crate::{Float, Sample};
@@ -213,15 +213,11 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
 
             let (frames_in, frames_out) = {
                 // InterleavedSlice is a zero-cost abstraction - no heap allocation occurs here
-                let input_adapter = audioadapter_buffers::direct::InterleavedSlice::new(
-                    &self.input_buffer,
-                    num_channels,
-                    actual_frames,
-                )
-                .ok()?;
+                let input_adapter =
+                    InterleavedSlice::new(&self.input_buffer, num_channels, actual_frames).ok()?;
 
                 let num_frames = self.output_buffer.capacity() / num_channels;
-                let mut output_adapter = audioadapter_buffers::direct::InterleavedSlice::new_mut(
+                let mut output_adapter = InterleavedSlice::new_mut(
                     self.output_buffer.as_mut_slice(),
                     num_channels,
                     num_frames,
