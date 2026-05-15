@@ -303,7 +303,7 @@ mod tests {
     fn metadata_gap_when_queue_briefly_empty() {
         let new_rate = nz!(48000);
         let (tx, mut rx) = queue::queue(false);
-        tx.append(SamplesBuffer::new(nz!(1), nz!(44100), vec![1.0_f32]));
+        tx.append(SamplesBuffer::new(nz!(1), nz!(44100), vec![1.0]));
         assert_eq!(rx.next(), Some(1.0));
 
         // Source is exhausted, nothing queued yet. A real consumer reads metadata here
@@ -311,7 +311,7 @@ mod tests {
         let rate_seen_by_consumer = rx.sample_rate();
 
         // The replacement source arrives only after the metadata was already queried.
-        tx.append(SamplesBuffer::new(nz!(1), new_rate, vec![2.0_f32]));
+        tx.append(SamplesBuffer::new(nz!(1), new_rate, vec![2.0]));
 
         // Ideally the consumer would have seen 48000. In practice it saw 44100.
         assert_eq!(rate_seen_by_consumer, new_rate);
@@ -327,7 +327,7 @@ mod tests {
 
         let (tx, mut rx) = queue::queue(false);
         tx.append(chain(std::iter::empty::<SamplesBuffer>()));
-        tx.append(SamplesBuffer::new(nz!(1), source_rate, vec![1.0_f32, 2.0]));
+        tx.append(SamplesBuffer::new(nz!(1), source_rate, vec![1.0, 2.0]));
 
         assert_eq!(rx.channels(), nz!(1));
         assert_eq!(rx.sample_rate(), source_rate);

@@ -140,7 +140,7 @@ mod tests {
         let mut c = chain(std::iter::once(SamplesBuffer::new(
             nz!(1),
             nz!(48000),
-            vec![1.0_f32, 2.0],
+            vec![1.0, 2.0],
         )));
         assert_eq!(c.next(), Some(1.0));
         assert_eq!(c.next(), Some(2.0));
