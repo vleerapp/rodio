@@ -18,7 +18,7 @@
 //
 
 use super::{SeekError, SpanTracker};
-use crate::math::{duration_to_coefficient, duration_to_float};
+use crate::math::{duration_to_coefficient, duration_to_float, fast_exp};
 use crate::{ChannelCount, Float, Sample, SampleRate, Source};
 use std::time::Duration;
 
@@ -285,21 +285,6 @@ impl CircularBufferRMS {
             .sqrt()
             .min(1.0)
     }
-}
-
-/// Fast approximation of `exp(x)` using Horner's Method for Polynomial Evaluation.
-/// This function approximates the exponential function by evaluating the
-/// third-order Taylor polynomial using Horner's scheme, which reduces the
-/// number of multiplications and improves numerical stability.
-///
-/// This approximation is valid for small values of `x` (near zero) and is
-/// used in the AGC algorithm to efficiently compute the release coefficient.
-/// It provides a good balance between speed and accuracy, resulting in
-/// faster benchmark times compared to the standard `exp` function.
-#[inline]
-fn fast_exp(x: Float) -> Float {
-    // Horner's method: 1 + x*(1 + x*(0.5 + x/6))
-    1.0 + x * (1.0 + x * (0.5 + x / 6.0))
 }
 
 /// Constructs an `AutomaticGainControl` object with specified parameters.

@@ -154,6 +154,21 @@ pub(crate) fn duration_from_secs(secs: Float) -> Duration {
     }
 }
 
+/// Fast approximation of `exp(x)` using Horner's Method for Polynomial Evaluation.
+/// This function approximates the exponential function by evaluating the
+/// third-order Taylor polynomial using Horner's scheme, which reduces the
+/// number of multiplications and improves numerical stability.
+///
+/// This approximation is valid for small values of `x` (near zero) and is
+/// used in the AGC algorithm to efficiently compute the release coefficient.
+/// It provides a good balance between speed and accuracy, resulting in
+/// faster benchmark times compared to the standard `exp` function.
+#[inline]
+pub(crate) fn fast_exp(x: Float) -> Float {
+    // Horner's method: 1 + x*(1 + x*(0.5 + x/6))
+    1.0 + x * (1.0 + x * (0.5 + x / 6.0))
+}
+
 /// Utility macro for getting a `NonZero` from a literal. Especially
 /// useful for passing in `ChannelCount` and `Samplerate`.
 /// Equivalent to: `const { core::num::NonZero::new($n).unwrap() }`
