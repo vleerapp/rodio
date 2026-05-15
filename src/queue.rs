@@ -159,10 +159,22 @@ impl Source for SourcesQueueOutput {
     #[inline]
     fn channels(&self) -> ChannelCount {
         if self.current.is_exhausted() && self.silence_samples_remaining == 0 {
-            if let Some((next, _)) = self.input.next_sounds.lock().unwrap().front() {
-                // Current source exhausted, peek at next queued source
-                // This is critical: UniformSourceIterator queries metadata during append,
-                // before any samples are pulled. We must report the next source's metadata.
+            // Skip exhausted sources at the head of the queue (e.g. an empty chain) and
+            // return the first non-exhausted source's metadata. This is critical:
+            // UniformSourceIterator queries metadata before pulling any samples, so we
+            // must report the upcoming source's format, not a preceding exhausted stub.
+            //
+            // If the queue is genuinely empty there is nothing to peek at. The stale value
+            // is returned below. This is corrected at the first span boundary after the
+            // new source begins playing.
+            if let Some((next, _)) = self
+                .input
+                .next_sounds
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(s, _)| !s.is_exhausted())
+            {
                 return next.channels();
             }
         }
@@ -173,9 +185,14 @@ impl Source for SourcesQueueOutput {
     #[inline]
     fn sample_rate(&self) -> SampleRate {
         if self.current.is_exhausted() && self.silence_samples_remaining == 0 {
-            if let Some((next, _)) = self.input.next_sounds.lock().unwrap().front() {
-                // Current source exhausted, peek at next queued source
-                // This prevents wrong resampling setup in UniformSourceIterator
+            if let Some((next, _)) = self
+                .input
+                .next_sounds
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(s, _)| !s.is_exhausted())
+            {
                 return next.sample_rate();
             }
         }
@@ -277,9 +294,47 @@ impl SourcesQueueOutput {
 mod tests {
     use crate::buffer::SamplesBuffer;
     use crate::math::nz;
-    use crate::queue;
-    use crate::source::test_utils::TestSource;
-    use crate::source::Source;
+    use crate::source::{chain, SeekError, Source};
+    use crate::{queue, ChannelCount, Sample, SampleRate};
+    use std::time::Duration;
+
+    #[test]
+    #[ignore = "known limitation: metadata gap when queue is briefly empty after exhaustion"]
+    fn metadata_gap_when_queue_briefly_empty() {
+        let new_rate = nz!(48000);
+        let (tx, mut rx) = queue::queue(false);
+        tx.append(SamplesBuffer::new(nz!(1), nz!(44100), vec![1.0_f32]));
+        assert_eq!(rx.next(), Some(1.0));
+
+        // Source is exhausted, nothing queued yet. A real consumer reads metadata here
+        // to set up its converter — it gets the stale value.
+        let rate_seen_by_consumer = rx.sample_rate();
+
+        // The replacement source arrives only after the metadata was already queried.
+        tx.append(SamplesBuffer::new(nz!(1), new_rate, vec![2.0_f32]));
+
+        // Ideally the consumer would have seen 48000. In practice it saw 44100.
+        assert_eq!(rate_seen_by_consumer, new_rate);
+    }
+
+    #[test]
+    fn exhausted_source_in_queue_is_skipped_for_metadata() {
+        let source_rate = nz!(48000);
+        // The empty chain's dummy rate must differ from source_rate, otherwise the test
+        // would not catch the bug (both values would satisfy the assertion below).
+        let empty_chain_dummy_rate = chain(std::iter::empty::<SamplesBuffer>()).sample_rate();
+        assert_ne!(empty_chain_dummy_rate, source_rate);
+
+        let (tx, mut rx) = queue::queue(false);
+        tx.append(chain(std::iter::empty::<SamplesBuffer>()));
+        tx.append(SamplesBuffer::new(nz!(1), source_rate, vec![1.0_f32, 2.0]));
+
+        assert_eq!(rx.channels(), nz!(1));
+        assert_eq!(rx.sample_rate(), source_rate);
+        assert_eq!(rx.next(), Some(1.0));
+        assert_eq!(rx.next(), Some(2.0));
+        assert_eq!(rx.next(), None);
+    }
 
     #[test]
     fn basic() {

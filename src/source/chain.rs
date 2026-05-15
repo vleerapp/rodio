@@ -78,36 +78,14 @@ where
 {
     #[inline]
     fn current_span_len(&self) -> Option<usize> {
-        // This function is non-trivial because the boundary between the current source and the
-        // next must be a span boundary as well.
-        //
-        // The current sound is free to return `None` for `current_span_len()`, in which case
-        // we *should* return the number of samples remaining the current sound.
-        // This can be estimated with `size_hint()`.
-        //
-        // If the `size_hint` is `None` as well, we are in the worst case scenario. To handle this
-        // situation we force a span to have a maximum number of samples indicate by this
-        // constant.
-        const THRESHOLD: usize = 10240;
-
-        // Try the current `current_span_len`.
-        if let Some(src) = &self.current_source {
-            if !src.is_exhausted() {
-                return src.current_span_len();
-            }
+        // The transition between sources must be a span boundary. We propagate the current
+        // source's span length directly. When the source is exhausted it already returns Some(0),
+        // which correctly signals end-of-span. The None case (empty iterator) is likewise
+        // signalled as Some(0).
+        match &self.current_source {
+            None => Some(0),
+            Some(src) => src.current_span_len(),
         }
-
-        // Try the size hint.
-        if let Some(src) = &self.current_source {
-            if let Some(val) = src.size_hint().1 {
-                if val < THRESHOLD && val != 0 {
-                    return Some(val);
-                }
-            }
-        }
-
-        // Otherwise we use the constant value.
-        Some(THRESHOLD)
     }
 
     #[inline]
@@ -150,6 +128,25 @@ mod tests {
     use crate::buffer::SamplesBuffer;
     use crate::math::nz;
     use crate::source::{chain, Source};
+
+    #[test]
+    fn empty_chain_reports_end_of_span() {
+        let c = chain(std::iter::empty::<SamplesBuffer>());
+        assert_eq!(c.current_span_len(), Some(0));
+    }
+
+    #[test]
+    fn exhausted_chain_reports_end_of_span() {
+        let mut c = chain(std::iter::once(SamplesBuffer::new(
+            nz!(1),
+            nz!(48000),
+            vec![1.0_f32, 2.0],
+        )));
+        assert_eq!(c.next(), Some(1.0));
+        assert_eq!(c.next(), Some(2.0));
+        assert_eq!(c.next(), None);
+        assert_eq!(c.current_span_len(), Some(0));
+    }
 
     #[test]
     fn basic() {

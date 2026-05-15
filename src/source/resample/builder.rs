@@ -56,16 +56,21 @@ pub enum Sinc {
     /// result is equivalent to that of synchronous resampling.
     Nearest,
 
-    /// Linear interpolation between two nearest points.
+    /// Linear interpolation between two adjacent sinc filter coefficients.
     ///
-    /// Relatively fast, but needs a large number of intermediate points to push the resampling
-    /// artefacts below the noise floor.
+    /// To resample to a fractional position, Rubato looks up the nearest two entries in the
+    /// precomputed sinc coefficient table and draws a straight line between them. Because the sinc
+    /// function is curved, this straight-line segment requires more intermediate points to push
+    /// the resampling artefacts below the noise floor. This is achieved using a higher
+    /// [`oversampling_factor`](SincConfigBuilder::oversampling_factor). [`Cubic`](Sinc::Cubic)
+    /// fits a polynomial that follows the curvature, achieving the same accuracy with a smaller
+    /// table.
     #[default]
     Linear,
 
     /// Quadratic interpolation using three nearest points.
     ///
-    /// The computation time lies approximately halfway between that of linear and quadratic
+    /// The computation time lies approximately halfway between that of linear and cubic
     /// interpolation.
     Quadratic,
 
@@ -295,6 +300,31 @@ impl ResampleConfig {
             #[cfg(feature = "rubato-fft")]
             sub_chunks: DEFAULT_SUB_CHUNKS,
         }
+    }
+
+    /// Nearest-neighbor (zero-order hold) polynomial resampling. Fastest, no anti-aliasing.
+    pub fn nearest() -> Self {
+        Self::poly().degree(Poly::Nearest).build()
+    }
+
+    /// Linear polynomial resampling. Fast, no anti-aliasing.
+    pub fn linear() -> Self {
+        Self::poly().degree(Poly::Linear).build()
+    }
+
+    /// Cubic polynomial resampling. Smoother than linear, no anti-aliasing.
+    pub fn cubic() -> Self {
+        Self::poly().degree(Poly::Cubic).build()
+    }
+
+    /// Quintic polynomial resampling. Smoother than cubic, no anti-aliasing.
+    pub fn quintic() -> Self {
+        Self::poly().degree(Poly::Quintic).build()
+    }
+
+    /// Septic polynomial resampling. Highest polynomial quality, no anti-aliasing.
+    pub fn septic() -> Self {
+        Self::poly().degree(Poly::Septic).build()
     }
 
     /// Create a polynomial resampling configuration builder.

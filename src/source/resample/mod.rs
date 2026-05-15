@@ -86,6 +86,7 @@ use crate::{
     Float, Source,
 };
 
+mod buffer;
 mod builder;
 mod rubato;
 
@@ -106,6 +107,7 @@ pub struct Resample<I>
 where
     I: Source,
 {
+    // Kept in Option so we can take ownership for in-place recreation on parameter change
     inner: Option<ResampleInner<I>>,
     target_rate: SampleRate,
     config: ResampleConfig,
@@ -130,6 +132,16 @@ where
     /// Create a new resampler with the given configuration.
     pub fn new(source: I, target_rate: SampleRate, config: ResampleConfig) -> Self {
         let inner = Self::create_resampler(source, target_rate, &config);
+
+        #[cfg(debug_assertions)]
+        if matches!(inner, ResampleInner::Sinc(_)) {
+            eprintln!(
+                "Warning: async sinc resampling is active. This is CPU-intensive and may \
+                 produce choppy audio in a debug build. Either use an integer-multiple ratio \
+                 or compile with --release."
+            );
+        }
+
         let cached_input_span_len = match &inner {
             ResampleInner::Passthrough { .. } => inner.input().current_span_len(),
             ResampleInner::Poly(resampler) => resampler.input.current_span_len(),
@@ -246,6 +258,16 @@ where
         }
     }
 
+    #[inline]
+    fn resampler(&self) -> &ResampleInner<I> {
+        self.inner.as_ref().unwrap()
+    }
+
+    #[inline]
+    fn resampler_mut(&mut self) -> &mut ResampleInner<I> {
+        self.inner.as_mut().unwrap()
+    }
+
     /// Returns a reference to the inner source.
     #[inline]
     pub fn inner(&self) -> &I {
@@ -275,6 +297,33 @@ where
     pub fn into_inner(self) -> I {
         self.inner.unwrap().into_inner()
     }
+
+    /// Returns `(at_boundary, parameters_changed)` given span tracking state.
+    ///
+    /// Two modes:
+    /// - Counting (`cached_span_len` is `Some`): boundary when `samples_consumed >= span_len`
+    /// - Detection (`cached_span_len` is `None`): boundary when parameters change (post-seek)
+    fn detect_boundary(
+        cached_span_len: Option<usize>,
+        samples_consumed: usize,
+        current_channels: ChannelCount,
+        expected_channels: ChannelCount,
+        current_rate: SampleRate,
+        expected_rate: SampleRate,
+    ) -> (bool, bool) {
+        let known_boundary = cached_span_len.map(|len| samples_consumed >= len);
+        // In counting mode: only check parameters at boundary
+        // In detection mode: check parameters at every sample until a boundary is detected
+        let parameters_changed = if known_boundary.is_none_or(|at| at) {
+            current_channels != expected_channels || current_rate != expected_rate
+        } else {
+            false
+        };
+        (
+            known_boundary.unwrap_or(parameters_changed),
+            parameters_changed,
+        )
+    }
 }
 
 impl<I> Source for Resample<I>
@@ -287,8 +336,8 @@ where
             input_span_len,
             input_sample_rate,
             input_exhausted,
-            output_buffer_len,
-            output_buffer_pos,
+            output_has_samples,
+            output_len,
             output_frames_next,
         ) = match self.inner.as_ref().unwrap() {
             ResampleInner::Passthrough { source, .. } => return source.current_span_len(),
@@ -296,8 +345,8 @@ where
                 resampler.input.current_span_len(),
                 resampler.input.sample_rate(),
                 resampler.input.is_exhausted(),
-                resampler.output_buffer_len,
-                resampler.output_buffer_pos,
+                resampler.output_has_samples(),
+                resampler.output_len(),
                 resampler.resampler.output_frames_next(),
             ),
             #[cfg(feature = "rubato-fft")]
@@ -305,8 +354,8 @@ where
                 resampler.input.current_span_len(),
                 resampler.input.sample_rate(),
                 resampler.input.is_exhausted(),
-                resampler.output_buffer_len,
-                resampler.output_buffer_pos,
+                resampler.output_has_samples(),
+                resampler.output_len(),
                 resampler.resampler.output_frames_next(),
             ),
         };
@@ -318,9 +367,9 @@ where
         } else {
             // When the ratio contains a fraction, we cannot choose the floor or ceiling
             // arbitrarily, because the resampler may produce either based on its internal state
-            if output_buffer_pos < output_buffer_len {
+            if output_has_samples {
                 // Running state: we are iterating over our buffer with resampled samples
-                Some(output_buffer_len)
+                Some(output_len)
             } else if input_exhausted {
                 // End state: we are at the end of our buffer and the source is exhausted
                 Some(0)
@@ -339,29 +388,17 @@ where
 
     #[inline]
     fn channels(&self) -> ChannelCount {
-        match self.inner.as_ref().unwrap() {
-            ResampleInner::Passthrough { source, .. } => source.channels(),
-            ResampleInner::Poly(resampler) => resampler.channels,
-            ResampleInner::Sinc(resampler) => resampler.channels,
-            #[cfg(feature = "rubato-fft")]
-            ResampleInner::Fft(resampler) => resampler.channels,
-        }
+        self.resampler().input().channels()
     }
 
     #[inline]
     fn total_duration(&self) -> Option<Duration> {
-        match self.inner.as_ref().unwrap() {
-            ResampleInner::Passthrough { source, .. } => source.total_duration(),
-            ResampleInner::Poly(resampler) => resampler.input.total_duration(),
-            ResampleInner::Sinc(resampler) => resampler.input.total_duration(),
-            #[cfg(feature = "rubato-fft")]
-            ResampleInner::Fft(resampler) => resampler.input.total_duration(),
-        }
+        self.resampler().input().total_duration()
     }
 
     #[inline]
     fn try_seek(&mut self, position: Duration) -> Result<(), SeekError> {
-        match self.inner.as_mut().unwrap() {
+        match self.resampler_mut() {
             ResampleInner::Passthrough { source, .. } => source.try_seek(position)?,
             ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
                 r.input.try_seek(position)?;
@@ -374,7 +411,7 @@ where
             }
         }
 
-        let input_span_len = self.inner.as_ref().unwrap().input().current_span_len();
+        let input_span_len = self.resampler().input().current_span_len();
 
         match self.inner.as_mut().unwrap() {
             ResampleInner::Passthrough {
@@ -429,77 +466,65 @@ where
 
         // If input reports no span length, parameters are stable by contract
         let input_span_len = self.inner.as_ref().unwrap().input().current_span_len();
-        if input_span_len.is_some() {
-            let (expected_channels, expected_rate, samples_consumed) =
+        if input_span_len.is_none() {
+            return Some(sample);
+        }
+
+        let (expected_channels, expected_rate, samples_consumed) =
+            match self.inner.as_mut().unwrap() {
+                ResampleInner::Passthrough {
+                    input_span_pos: input_samples_consumed,
+                    channels,
+                    source_rate,
+                    ..
+                } => {
+                    *input_samples_consumed += 1;
+                    (*channels, *source_rate, *input_samples_consumed)
+                }
+                ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
+                    (r.channels, r.source_rate, r.input_samples_consumed)
+                }
+                #[cfg(feature = "rubato-fft")]
+                ResampleInner::Fft(r) => (r.channels, r.source_rate, r.input_samples_consumed),
+            };
+
+        let input = self.inner.as_ref().unwrap().input();
+        let (at_boundary, parameters_changed) = Self::detect_boundary(
+            self.cached_input_span_len,
+            samples_consumed,
+            input.channels(),
+            expected_channels,
+            input.sample_rate(),
+            expected_rate,
+        );
+
+        if at_boundary {
+            // Update cached span length (exits detection mode if we were in it)
+            self.cached_input_span_len = input_span_len;
+
+            if parameters_changed {
+                // Recreate resampler - new resampler will have counters reset to 0
+                let source = self.inner.take().unwrap().into_inner();
+                self.inner = Some(Self::create_resampler(
+                    source,
+                    self.target_rate,
+                    &self.config,
+                ));
+            } else {
+                // Just crossed boundary without parameter change, reset counter
                 match self.inner.as_mut().unwrap() {
                     ResampleInner::Passthrough {
                         input_span_pos: input_samples_consumed,
-                        channels,
-                        source_rate,
                         ..
                     } => {
-                        *input_samples_consumed += 1;
-                        (*channels, *source_rate, *input_samples_consumed)
+                        *input_samples_consumed = 0;
                     }
                     ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
-                        (r.channels, r.source_rate, r.input_samples_consumed)
+                        r.input_samples_consumed = 0;
                     }
                     #[cfg(feature = "rubato-fft")]
-                    ResampleInner::Fft(r) => (r.channels, r.source_rate, r.input_samples_consumed),
-                };
-
-            // Get current parameters from input
-            let input = self.inner.as_ref().unwrap().input();
-            let current_channels = input.channels();
-            let current_rate = input.sample_rate();
-
-            // Determine if we're at a span boundary:
-            // - Counting mode (Some): boundary when we've consumed span_len samples
-            // - Detection mode (None): boundary when parameters change (mid-span seek recovery)
-            let mut parameters_changed = false;
-            let at_boundary = {
-                let known_boundary = self
-                    .cached_input_span_len
-                    .map(|cached_len| samples_consumed >= cached_len);
-
-                // In counting mode: only check parameters at boundary
-                // In detection mode: check parameters at every sample until detecting a boundary
-                if known_boundary.is_none_or(|at_boundary| at_boundary) {
-                    parameters_changed =
-                        current_channels != expected_channels || current_rate != expected_rate;
-                }
-
-                known_boundary.unwrap_or(parameters_changed)
-            };
-
-            if at_boundary {
-                // Update cached span length (exits detection mode if we were in it)
-                self.cached_input_span_len = input_span_len;
-
-                if parameters_changed {
-                    // Recreate resampler - new resampler will have counters reset to 0
-                    let source = self.inner.take().unwrap().into_inner();
-                    self.inner = Some(Self::create_resampler(
-                        source,
-                        self.target_rate,
-                        &self.config,
-                    ));
-                } else {
-                    // Just crossed boundary without parameter change, reset counter
-                    match self.inner.as_mut().unwrap() {
-                        ResampleInner::Passthrough {
-                            input_span_pos: input_samples_consumed,
-                            ..
-                        } => {
-                            *input_samples_consumed = 0;
-                        }
-                        ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
-                            r.input_samples_consumed = 0;
-                        }
-                        #[cfg(feature = "rubato-fft")]
-                        ResampleInner::Fft(r) => {
-                            r.input_samples_consumed = 0;
-                        }
+                    ResampleInner::Fft(r) => {
+                        r.input_samples_consumed = 0;
                     }
                 }
             }
@@ -514,13 +539,13 @@ where
             ResampleInner::Passthrough { source, .. } => return source.size_hint(),
             ResampleInner::Poly(resampler) | ResampleInner::Sinc(resampler) => {
                 let input_hint = resampler.input.size_hint();
-                let buffered_remaining = resampler.output_buffer_len - resampler.output_buffer_pos;
+                let buffered_remaining = resampler.output_remaining();
                 (input_hint, resampler.source_rate, buffered_remaining)
             }
             #[cfg(feature = "rubato-fft")]
             ResampleInner::Fft(resampler) => {
                 let input_hint = resampler.input.size_hint();
-                let buffered_remaining = resampler.output_buffer_len - resampler.output_buffer_pos;
+                let buffered_remaining = resampler.output_remaining();
                 (input_hint, resampler.source_rate, buffered_remaining)
             }
         };

@@ -1,118 +1,100 @@
 //! Example demonstrating audio resampling with different quality presets.
 
-use rodio::source::{resample::Poly, ResampleConfig, Source};
-use rodio::{Decoder, Player};
+use clap::Parser;
+use rodio::source::{ResampleConfig, Source};
+use rodio::{Decoder, DeviceSinkBuilder, Player};
 use std::error::Error;
-use std::fs::File;
-use std::io::BufReader;
+use std::num::NonZero;
+use std::path::PathBuf;
 use std::time::Instant;
 
+#[derive(Parser)]
+#[command(about = "Resample audio using different quality presets")]
+struct Args {
+    /// Target sample rate in Hz (default: device native rate)
+    #[arg(long = "rate")]
+    target_rate: Option<NonZero<u32>>,
+
+    /// Path to audio file
+    #[arg(long = "file", default_value = "assets/music.ogg")]
+    audio_file: PathBuf,
+
+    /// Resampling method
+    #[arg(long = "method", value_enum, default_value_t = Method::Balanced)]
+    method: Method,
+}
+
+#[derive(clap::ValueEnum, Clone)]
+enum Method {
+    /// Nearest-neighbor (zero-order hold) polynomial resampling. Fastest, no anti-aliasing.
+    Nearest,
+    /// Linear polynomial resampling. Fast, no anti-aliasing.
+    Linear,
+    /// Cubic polynomial resampling. Smoother than linear, no anti-aliasing.
+    Cubic,
+    /// Quintic polynomial resampling. Smoother than cubic, no anti-aliasing.
+    Quintic,
+    /// Septic polynomial resampling. Highest polynomial quality, no anti-aliasing.
+    Septic,
+    /// 64-tap sinc, linear interpolation, Hann2 window.
+    VeryFast,
+    /// 128-tap sinc, linear interpolation, Blackman2 window.
+    Fast,
+    /// 192-tap sinc, quadratic interpolation, BlackmanHarris2 window (default).
+    Balanced,
+    /// 256-tap sinc, cubic interpolation, BlackmanHarris2 window.
+    Accurate,
+}
+
+impl From<Method> for ResampleConfig {
+    fn from(method: Method) -> Self {
+        match method {
+            Method::Nearest => ResampleConfig::nearest(),
+            Method::Linear => ResampleConfig::linear(),
+            Method::Cubic => ResampleConfig::cubic(),
+            Method::Quintic => ResampleConfig::quintic(),
+            Method::Septic => ResampleConfig::septic(),
+            Method::VeryFast => ResampleConfig::very_fast(),
+            Method::Fast => ResampleConfig::fast(),
+            Method::Balanced => ResampleConfig::balanced(),
+            Method::Accurate => ResampleConfig::accurate(),
+        }
+    }
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    #[cfg(debug_assertions)]
-    {
-        eprintln!("WARNING: Running in debug mode. Audio may be choppy, especially with");
-        eprintln!("         sinc resampling of non-integer ratios (async resampling).");
-        eprintln!("         For best results, compile with --release");
-        eprintln!();
-    }
+    let args = Args::parse();
+    let config = ResampleConfig::from(args.method);
 
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.len() < 2 {
-        eprintln!("Usage: {} <target_rate> [audio_file] [method]", args[0]);
-        eprintln!("\nTarget rate: Sample rate in Hz (e.g., 48000, 96000)");
-        eprintln!("\nAudio file (optional): Path to audio file (default: assets/music.ogg)");
-        eprintln!("\nMethod (optional): nearest, linear, fast, balanced, accurate");
-        eprintln!("\nMethod details:");
-        eprintln!("  nearest   - Zero-order hold (non-oversampling), fastest");
-        eprintln!("  linear    - Linear polynomial interpolation, fast");
-        eprintln!("  very_fast - 64-tap sinc, linear interpolation, Hann2 window");
-        eprintln!("  fast      - 128-tap sinc, linear interpolation, Hann2 window");
-        eprintln!("  balanced  - 192-tap sinc, linear interpolation, Blackman2 window (default)");
-        eprintln!("  accurate  - 256-tap sinc, cubic interpolation, BlackmanHarris2 window");
-        eprintln!("\nExamples:");
-        eprintln!("  {} 48000", args[0]);
-        eprintln!("  {} 96000 assets/music.ogg accurate", args[0]);
-        std::process::exit(1);
-    }
-
-    let target_rate: u32 = args[1].parse().map_err(|_| {
-        format!(
-            "Invalid target rate '{}'. Must be a positive integer (e.g., 48000)",
-            args[1]
-        )
-    })?;
-
-    if target_rate == 0 {
-        return Err("Target rate must be greater than 0".into());
-    }
-
-    let audio_path = if args.len() > 2 {
-        args[2].clone()
-    } else {
-        "assets/music.ogg".to_string()
+    let builder = DeviceSinkBuilder::from_default_device()?;
+    let stream_handle = match args.target_rate {
+        Some(rate) => builder.with_sample_rate(rate).open_stream()?,
+        None => builder.open_stream()?,
     };
+    let target_rate = stream_handle.config().sample_rate();
 
-    let config = if args.len() > 3 {
-        parse_quality(&args[3])?
-    } else {
-        ResampleConfig::default()
-    };
-
-    println!("Audio file: {audio_path}");
-
-    let file = File::open(&audio_path)
-        .map_err(|e| format!("Failed to open audio file '{audio_path}': {e}"))?;
-    let source = Decoder::try_from(BufReader::new(file))?;
+    let file = std::fs::File::open(&args.audio_file)
+        .map_err(|e| format!("Failed to open '{}': {e}", args.audio_file.display()))?;
+    let source = Decoder::try_from(file)?;
 
     let source_rate = source.sample_rate().get();
     let channels = source.channels().get();
-    let duration = source.total_duration();
 
-    if let Some(dur) = duration {
-        println!("Duration: {:.2}s", dur.as_secs_f32());
+    if let Some(dur) = source.total_duration() {
+        println!("Duration: {dur:?}");
     }
 
-    println!("\nResampling {channels} channels from {source_rate} Hz to {target_rate} Hz...");
+    println!("Resampling {channels}ch {source_rate} Hz → {target_rate} Hz");
     println!("Configuration: {config:#?}");
-    let resampled = source.resample(rodio::SampleRate::new(target_rate).unwrap(), config);
 
-    println!("\nConfiguring output device to {target_rate} Hz...");
-    let stream_handle = rodio::DeviceSinkBuilder::from_default_device()?
-        .with_sample_rate(rodio::SampleRate::new(target_rate).unwrap())
-        .open_stream()?;
+    let resampled = source.resample(target_rate, config);
     let player = Player::connect_new(stream_handle.mixer());
 
-    println!("Playing resampled audio...");
-    println!("Press Ctrl+C to stop");
-
-    let playback_start = Instant::now();
+    println!("Playing... (Ctrl+C to stop)");
+    let start = Instant::now();
     player.append(resampled);
     player.sleep_until_end();
 
-    let playback_time = playback_start.elapsed();
-    println!("\nPlayback finished in {:.2}s", playback_time.as_secs_f32());
-
+    println!("Finished in {:?}", start.elapsed());
     Ok(())
-}
-
-/// Parse the resampling quality from a string argument
-fn parse_quality(method: &str) -> Result<ResampleConfig, Box<dyn Error>> {
-    let config = match method.to_lowercase().as_str() {
-        "nearest" => ResampleConfig::poly().degree(Poly::Nearest).build(),
-        "linear" => ResampleConfig::poly().degree(Poly::Linear).build(),
-        "cubic" => ResampleConfig::poly().degree(Poly::Cubic).build(),
-        "quintic" => ResampleConfig::poly().degree(Poly::Quintic).build(),
-        "septic" => ResampleConfig::poly().degree(Poly::Septic).build(),
-        "very_fast" => ResampleConfig::very_fast(),
-        "fast" => ResampleConfig::fast(),
-        "balanced" => ResampleConfig::balanced(),
-        "accurate" => ResampleConfig::accurate(),
-        _ => return Err(format!(
-            "Unknown resampling method '{}'. Valid options: nearest, linear, cubic, quintic, septic, very_fast, fast, balanced, accurate",
-            method
-        )
-        .into()),
-    };
-    Ok(config)
 }
