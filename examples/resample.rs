@@ -2,6 +2,8 @@
 
 use clap::Parser;
 use rodio::source::{ResampleConfig, Source};
+#[cfg(feature = "wav_output")]
+use rodio::wav_to_file;
 use rodio::{Decoder, DeviceSinkBuilder, Player};
 use std::error::Error;
 use std::num::NonZero;
@@ -11,13 +13,19 @@ use std::time::Instant;
 #[derive(Parser)]
 #[command(about = "Resample audio using different quality presets")]
 struct Args {
-    /// Target sample rate in Hz (default: device native rate)
+    /// Target sample rate in Hz (default: device native rate when playing, source rate when
+    /// writing)
     #[arg(long = "rate")]
     target_rate: Option<NonZero<u32>>,
 
-    /// Path to audio file
-    #[arg(long = "file", default_value = "assets/music.ogg")]
-    audio_file: PathBuf,
+    /// Path to input audio file
+    #[arg(long = "input", default_value = "assets/music.ogg")]
+    input: PathBuf,
+
+    /// Path to output WAV file; if omitted, audio plays to the default device
+    #[cfg(feature = "wav_output")]
+    #[arg(long = "output")]
+    output: Option<PathBuf>,
 
     /// Resampling method
     #[arg(long = "method", value_enum, default_value_t = Method::Balanced)]
@@ -66,15 +74,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let config = ResampleConfig::from(args.method);
 
-    let builder = DeviceSinkBuilder::from_default_device()?;
-    let stream_handle = match args.target_rate {
-        Some(rate) => builder.with_sample_rate(rate).open_stream()?,
-        None => builder.open_stream()?,
-    };
-    let target_rate = stream_handle.config().sample_rate();
-
-    let file = std::fs::File::open(&args.audio_file)
-        .map_err(|e| format!("Failed to open '{}': {e}", args.audio_file.display()))?;
+    let file = std::fs::File::open(&args.input)
+        .map_err(|e| format!("Failed to open '{}': {e}", args.input.display()))?;
     let source = Decoder::try_from(file)?;
 
     let source_rate = source.sample_rate().get();
@@ -83,6 +84,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(dur) = source.total_duration() {
         println!("Duration: {dur:?}");
     }
+
+    #[cfg(feature = "wav_output")]
+    if let Some(output_path) = args.output {
+        let target_rate = args.target_rate.unwrap_or_else(|| source.sample_rate());
+        println!("Resampling {channels}ch {source_rate} Hz → {target_rate} Hz");
+        println!("Configuration: {config:#?}");
+        let resampled = source.resample(target_rate, config);
+        println!("Writing to '{}'...", output_path.display());
+        let start = Instant::now();
+        wav_to_file(resampled, &output_path)?;
+        println!("Finished in {:?}", start.elapsed());
+        return Ok(());
+    }
+
+    let builder = DeviceSinkBuilder::from_default_device()?;
+    let stream_handle = match args.target_rate {
+        Some(rate) => builder.with_sample_rate(rate).open_stream()?,
+        None => builder.open_stream()?,
+    };
+    let target_rate = stream_handle.config().sample_rate();
 
     println!("Resampling {channels}ch {source_rate} Hz → {target_rate} Hz");
     println!("Configuration: {config:#?}");
