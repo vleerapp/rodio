@@ -45,10 +45,7 @@ use crate::decoder::symphonia::Registry;
 #[cfg(feature = "symphonia")]
 use self::read_seek_source::ReadSeekSource;
 #[cfg(feature = "symphonia")]
-use ::symphonia::core::{
-    codecs::CodecRegistry,
-    io::{MediaSource, MediaSourceStream},
-};
+use ::symphonia::core::io::{MediaSource, MediaSourceStream};
 #[cfg(feature = "symphonia")]
 use ::symphonia::default::register_enabled_codecs;
 
@@ -101,10 +98,13 @@ impl Default for Settings {
             is_seekable: false,
             #[cfg(feature = "symphonia")]
             codec_registry: {
+                use ::symphonia::core::codecs::registry::CodecRegistry;
+
                 let mut codec_registry = CodecRegistry::new();
                 register_enabled_codecs(&mut codec_registry);
                 #[cfg(feature = "symphonia-libopus")]
-                codec_registry.register_all::<symphonia_adapter_libopus::OpusDecoder>();
+                codec_registry
+                    .register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
                 Registry::new(codec_registry)
             },
         }
@@ -257,9 +257,12 @@ impl<R: Read + Seek + Send + Sync + 'static> DecoderBuilder<R> {
     #[cfg(feature = "symphonia")]
     pub fn with_decoder<D>(self) -> Self
     where
-        D: ::symphonia::core::codecs::Decoder,
+        D: ::symphonia::core::codecs::registry::RegisterableAudioDecoder,
     {
-        self.settings.codec_registry.write().register_all::<D>();
+        self.settings
+            .codec_registry
+            .write()
+            .register_audio_decoder::<D>();
         self
     }
 
