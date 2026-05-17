@@ -5,23 +5,26 @@ use std::{
 };
 use symphonia::{
     core::{
-        audio::{AudioBufferRef, SampleBuffer, SignalSpec},
-        codecs::{CodecRegistry, Decoder, DecoderOptions, CODEC_TYPE_NULL},
+        audio::AudioSpec,
+        codecs::{
+            CodecParameters,
+            audio::{AudioDecoder, AudioDecoderOptions, CODEC_ID_NULL_AUDIO},
+            registry::CodecRegistry,
+        },
         errors::Error,
-        formats::{FormatOptions, FormatReader, SeekMode, SeekTo, SeekedTo},
+        formats::{FormatOptions, FormatReader, SeekMode, SeekTo, SeekedTo, TrackType, probe::Hint},
         io::MediaSourceStream,
         meta::MetadataOptions,
-        probe::Hint,
-        units,
+        units::{TimeBase, Time},
     },
     default::get_probe,
 };
 
 use super::{DecoderError, Settings};
 use crate::{
-    common::{assert_error_traits, ChannelCount, Sample, SampleRate},
-    source::{self, padding_samples_needed},
     Source,
+    common::{ChannelCount, Sample, SampleRate, assert_error_traits},
+    source::{self, padding_samples_needed},
 };
 use dasp_sample::Sample as _;
 
@@ -49,20 +52,24 @@ impl Registry {
 }
 
 pub(crate) struct SymphoniaDecoder {
-    decoder: Box<dyn Decoder>,
+    decoder: Box<dyn AudioDecoder>,
     current_span_offset: usize,
     format: Box<dyn FormatReader>,
     total_duration: Option<Duration>,
-    buffer: SampleBuffer<Sample>,
-    spec: SignalSpec,
+    buffer: Vec<Sample>,
+    spec: AudioSpec,
     seek_mode: SeekMode,
     selected_track_id: u32,
+    time_base: Option<TimeBase>,
     samples_in_current_frame: usize,
     silence_samples_remaining: usize,
 }
 
 impl SymphoniaDecoder {
-    pub(crate) fn new(mss: MediaSourceStream, settings: &Settings) -> Result<Self, DecoderError> {
+    pub(crate) fn new(
+        mss: MediaSourceStream<'static>,
+        settings: &Settings,
+    ) -> Result<Self, DecoderError> {
         match SymphoniaDecoder::init(mss, settings) {
             Err(e) => match e {
                 Error::IoError(e) => Err(DecoderError::IoError(e.to_string())),
@@ -73,6 +80,7 @@ impl SymphoniaDecoder {
                 Error::Unsupported(_) => Err(DecoderError::UnrecognizedFormat),
                 Error::LimitError(e) => Err(DecoderError::LimitError(e)),
                 Error::ResetRequired => Err(DecoderError::ResetRequired),
+                _ => Err(DecoderError::UnrecognizedFormat),
             },
             Ok(Some(decoder)) => Ok(decoder),
             Ok(None) => Err(DecoderError::NoStreams),
@@ -80,12 +88,12 @@ impl SymphoniaDecoder {
     }
 
     #[inline]
-    pub(crate) fn into_inner(self) -> MediaSourceStream {
+    pub(crate) fn into_inner(self) -> MediaSourceStream<'static> {
         self.format.into_inner()
     }
 
     fn init(
-        mss: MediaSourceStream,
+        mss: MediaSourceStream<'static>,
         settings: &Settings,
     ) -> symphonia::core::errors::Result<Option<SymphoniaDecoder>> {
         let mut hint = Hint::new();
@@ -95,69 +103,62 @@ impl SymphoniaDecoder {
         if let Some(typ) = settings.mime_type.as_ref() {
             hint.mime_type(typ);
         }
-        let format_opts: FormatOptions = FormatOptions {
-            enable_gapless: settings.gapless,
-            ..Default::default()
-        };
+        let format_opts: FormatOptions = Default::default();
         let metadata_opts: MetadataOptions = Default::default();
+        let _ = settings.gapless;
         let seek_mode = if settings.coarse_seek {
             SeekMode::Coarse
         } else {
             SeekMode::Accurate
         };
-        let mut probed = get_probe().format(&hint, mss, &format_opts, &metadata_opts)?;
+        let mut format = get_probe().probe(&hint, mss, format_opts, metadata_opts)?;
 
-        let stream = match probed.format.default_track() {
-            Some(stream) => stream,
-            None => return Ok(None),
-        };
-
-        // Select the first supported track
-        let track = probed
-            .format
-            .tracks()
-            .iter()
-            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-            .ok_or(symphonia::core::errors::Error::Unsupported(
-                "No track with supported codec",
-            ))?;
-        let track_id = track.id;
-
-        let track = match probed
-            .format
-            .tracks()
-            .iter()
-            .find(|track| track.id == track_id)
-        {
+        let track = match format.first_track_known_codec(TrackType::Audio) {
             Some(track) => track,
             None => return Ok(None),
+        };
+        let track_id = track.id;
+        let time_base = track.time_base;
+        let num_frames = track.num_frames;
+
+        let audio_params = match track.codec_params.as_ref() {
+            Some(CodecParameters::Audio(params)) if params.codec != CODEC_ID_NULL_AUDIO => params,
+            _ => return Ok(None),
         };
 
         let mut decoder = settings
             .codec_registry
             .read()
-            .make(&track.codec_params, &DecoderOptions::default())?;
+            .make_audio_decoder(audio_params, &AudioDecoderOptions::default())?;
 
-        let total_duration = track
-            .codec_params
-            .time_base
-            .zip(stream.codec_params.n_frames)
-            .map(|(base, spans)| base.calc_time(spans).into())
-            .filter(|d: &Duration| !d.is_zero());
+        let total_duration = time_base.zip(num_frames).and_then(|(base, frames)| {
+            base.calc_time(symphonia::core::units::Timestamp::from(frames as i64))
+                .map(time_to_std_duration)
+                .filter(|d| !d.is_zero())
+        });
 
-        let decoded = loop {
-            let current_span = match probed.format.next_packet() {
-                Ok(packet) => packet,
-                Err(Error::IoError(_)) => break decoder.last_decoded(),
+        let mut decoded_buffer = Vec::<Sample>::new();
+        let (spec, has_decoded) = loop {
+            let packet = match format.next_packet() {
+                Ok(Some(packet)) => packet,
+                Ok(None) => {
+                    let last = decoder.last_decoded();
+                    if last.frames() > 0 {
+                        let spec = last.spec().clone();
+                        last.copy_to_vec_interleaved(&mut decoded_buffer);
+                        break (spec, true);
+                    }
+                    break (AudioSpec::default(), false);
+                }
                 Err(e) => return Err(e),
             };
 
             // If the packet does not belong to the selected track, skip over it
-            if current_span.track_id() != track_id {
+            if packet.track_id != track_id {
                 continue;
             }
 
-            let decoded = match decoder.decode(&current_span) {
+            let decoded = match decoder.decode(&packet) {
                 Ok(decoded) => decoded,
                 Err(e) => match e {
                     Error::DecodeError(_) => {
@@ -173,34 +174,40 @@ impl SymphoniaDecoder {
             // Loop until we get a packet with audio frames. This is necessary because some
             // formats can have packets with only metadata, particularly when rewinding, in
             // which case the iterator would otherwise end with `None`.
-            // Note: checking `decoded.frames()` is more reliable than `packet.dur()`, which
-            // can resturn non-zero durations for packets without audio frames.
             if decoded.frames() > 0 {
-                break decoded;
+                let spec = decoded.spec().clone();
+                decoded.copy_to_vec_interleaved(&mut decoded_buffer);
+                break (spec, true);
             }
         };
-        let spec = decoded.spec().to_owned();
-        let buffer = SymphoniaDecoder::get_buffer(decoded, &spec);
+
+        if !has_decoded {
+            return Ok(None);
+        }
+
         Ok(Some(SymphoniaDecoder {
             decoder,
             current_span_offset: 0,
-            format: probed.format,
+            format,
             total_duration,
-            buffer,
+            buffer: decoded_buffer,
             spec,
             seek_mode,
             selected_track_id: track_id,
+            time_base,
             samples_in_current_frame: 0,
             silence_samples_remaining: 0,
         }))
     }
+}
 
-    #[inline]
-    fn get_buffer(decoded: AudioBufferRef, spec: &SignalSpec) -> SampleBuffer<Sample> {
-        let duration = units::Duration::from(decoded.capacity() as u64);
-        let mut buffer = SampleBuffer::<Sample>::new(duration, *spec);
-        buffer.copy_interleaved_ref(decoded);
-        buffer
+#[inline]
+fn time_to_std_duration(time: Time) -> Duration {
+    let (secs, nanos) = time.parts();
+    if secs >= 0 {
+        Duration::new(secs as u64, nanos)
+    } else {
+        Duration::ZERO
     }
 }
 
@@ -214,7 +221,7 @@ impl Source for SymphoniaDecoder {
     fn channels(&self) -> ChannelCount {
         ChannelCount::new(
             self.spec
-                .channels
+                .channels()
                 .count()
                 .try_into()
                 .expect("rodio only support up to u16::MAX channels (65_535)"),
@@ -224,7 +231,7 @@ impl Source for SymphoniaDecoder {
 
     #[inline]
     fn sample_rate(&self) -> SampleRate {
-        SampleRate::new(self.spec.rate).expect("audio should always have a non zero SampleRate")
+        SampleRate::new(self.spec.rate()).expect("audio should always have a non zero SampleRate")
     }
 
     #[inline]
@@ -233,9 +240,7 @@ impl Source for SymphoniaDecoder {
     }
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), source::SeekError> {
-        if matches!(self.seek_mode, SeekMode::Accurate)
-            && self.decoder.codec_params().time_base.is_none()
-        {
+        if matches!(self.seek_mode, SeekMode::Accurate) && self.time_base.is_none() {
             return Err(source::SeekError::SymphoniaDecoder(
                 SeekError::AccurateSeekNotSupported,
             ));
@@ -250,13 +255,18 @@ impl Source for SymphoniaDecoder {
             }
         }
 
+        let target_time = Time::try_from_secs_f64(target.as_secs_f64())
+            .ok_or(source::SeekError::SymphoniaDecoder(
+                SeekError::AccurateSeekNotSupported,
+            ))?;
+
         // Remember the current channel, so we can restore it after seeking.
         let active_channel = self.current_span_offset % self.channels().get() as usize;
 
         let seek_res = match self.format.seek(
             self.seek_mode,
             SeekTo::Time {
-                time: target.into(),
+                time: target_time,
                 track_id: None,
             },
         ) {
@@ -315,15 +325,19 @@ assert_error_traits!(SeekError);
 impl SymphoniaDecoder {
     /// Note span offset must be set after
     fn refine_position(&mut self, seek_res: SeekedTo) -> Result<(), source::SeekError> {
+        let time_base = self
+            .time_base
+            .expect("time base availability guaranteed by caller");
+
+        // Calculate the time delta between requested and actual seek position.
+        let delta_ticks = (seek_res.required_ts.get() - seek_res.actual_ts.get()).max(0);
+        let delta = time_base
+            .calc_time(symphonia::core::units::Timestamp::new(delta_ticks))
+            .map(time_to_std_duration)
+            .unwrap_or(Duration::ZERO);
+
         // Calculate the number of samples to skip.
-        let mut samples_to_skip = (Duration::from(
-            self.decoder
-                .codec_params()
-                .time_base
-                .expect("time base availability guaranteed by caller")
-                .calc_time(seek_res.required_ts.saturating_sub(seek_res.actual_ts)),
-        )
-        .as_secs_f32()
+        let mut samples_to_skip = (delta.as_secs_f32()
             * self.sample_rate().get() as f32
             * self.channels().get() as f32)
             .ceil() as usize;
@@ -352,16 +366,16 @@ impl Iterator for SymphoniaDecoder {
             }
 
             if self.current_span_offset >= self.buffer.len() {
-                let decoded = loop {
+                let decoded_spec = loop {
                     let packet = match self.format.next_packet() {
-                        Ok(packet) => {
-                            if packet.track_id() == self.selected_track_id {
+                        Ok(Some(packet)) => {
+                            if packet.track_id == self.selected_track_id {
                                 packet
                             } else {
                                 continue;
                             }
                         }
-                        Err(_) => {
+                        Ok(None) | Err(_) => {
                             // Input exhausted - check if mid-frame
                             let channels = self.channels();
                             self.silence_samples_remaining =
@@ -397,17 +411,17 @@ impl Iterator for SymphoniaDecoder {
                     // Loop until we get a packet with audio frames. This is necessary because some
                     // formats can have packets with only metadata, particularly when rewinding, in
                     // which case the iterator would otherwise end with `None`.
-                    // Note: checking `decoded.frames()` is more reliable than `packet.dur()`, which
-                    // can resturn non-zero durations for packets without audio frames.
                     if decoded.frames() > 0 {
-                        break Some(decoded);
+                        let spec = decoded.spec().clone();
+                        self.buffer.clear();
+                        decoded.copy_to_vec_interleaved(&mut self.buffer);
+                        break Some(spec);
                     }
                 };
 
-                match decoded {
-                    Some(decoded) => {
-                        decoded.spec().clone_into(&mut self.spec);
-                        self.buffer = SymphoniaDecoder::get_buffer(decoded, &self.spec);
+                match decoded_spec {
+                    Some(spec) => {
+                        self.spec = spec;
                         self.current_span_offset = 0;
                     }
                     None => {
@@ -417,7 +431,7 @@ impl Iterator for SymphoniaDecoder {
                 }
             }
 
-            let sample = *self.buffer.samples().get(self.current_span_offset)?;
+            let sample = *self.buffer.get(self.current_span_offset)?;
             self.current_span_offset += 1;
 
             let channels = self.channels();
