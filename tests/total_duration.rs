@@ -24,7 +24,7 @@ use rstest_reuse::{self, *};
 #[rstest]
 #[cfg_attr(
     feature = "symphonia-vorbis",
-    case("ogg", Duration::from_secs_f64(69.328979591), "symphonia")
+    case("ogg", Duration::from_secs_f64(69.339138321), "symphonia")
 )]
 #[cfg_attr(
     all(feature = "hound", not(feature = "symphonia-wav")),

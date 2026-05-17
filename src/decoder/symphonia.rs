@@ -63,6 +63,10 @@ pub(crate) struct SymphoniaDecoder {
     time_base: Option<TimeBase>,
     samples_in_current_frame: usize,
     silence_samples_remaining: usize,
+    /// True when a prior seek targeted a position past the end of the stream. The iterator
+    /// reports no more samples (after flushing any in-flight frame padding) until another
+    /// `try_seek` resets the position.
+    seeked_past_end: bool,
 }
 
 impl SymphoniaDecoder {
@@ -119,20 +123,33 @@ impl SymphoniaDecoder {
         };
         let track_id = track.id;
         let time_base = track.time_base;
-        let num_frames = track.num_frames;
+        // `track.duration` is the playable length in timebase units. When gapless playback is
+        // disabled the decoder will additionally emit encoder delay/padding frames, so include
+        // those in the reported total so it reflects the actual sample count consumers will see.
+        let trim_ticks = if settings.gapless {
+            0
+        } else {
+            u64::from(track.delay.unwrap_or(0)) + u64::from(track.padding.unwrap_or(0))
+        };
+        let total_ticks = track
+            .duration
+            .map(|d| d.get())
+            .or(track.num_frames)
+            .map(|n| n.saturating_add(trim_ticks));
 
         let audio_params = match track.codec_params.as_ref() {
             Some(CodecParameters::Audio(params)) if params.codec != CODEC_ID_NULL_AUDIO => params,
             _ => return Ok(None),
         };
 
+        let decoder_opts = AudioDecoderOptions::default().gapless(settings.gapless);
         let mut decoder = settings
             .codec_registry
             .read()
-            .make_audio_decoder(audio_params, &AudioDecoderOptions::default())?;
+            .make_audio_decoder(audio_params, &decoder_opts)?;
 
-        let total_duration = time_base.zip(num_frames).and_then(|(base, frames)| {
-            base.calc_time(symphonia::core::units::Timestamp::from(frames as i64))
+        let total_duration = time_base.zip(total_ticks).and_then(|(base, ticks)| {
+            base.calc_time(symphonia::core::units::Timestamp::from(ticks as i64))
                 .map(time_to_std_duration)
                 .filter(|d| !d.is_zero())
         });
@@ -197,6 +214,7 @@ impl SymphoniaDecoder {
             time_base,
             samples_in_current_frame: 0,
             silence_samples_remaining: 0,
+            seeked_past_end: false,
         }))
     }
 }
@@ -275,6 +293,15 @@ impl Source for SymphoniaDecoder {
                     SeekError::RandomAccessNotSupported,
                 ));
             }
+            Err(Error::SeekError(symphonia::core::errors::SeekErrorKind::OutOfRange)) => {
+                // Saturate seeks past the end of the stream to the end.
+                self.decoder.reset();
+                self.current_span_offset = usize::MAX;
+                self.samples_in_current_frame = 0;
+                self.silence_samples_remaining = 0;
+                self.seeked_past_end = true;
+                return Ok(());
+            }
             other => other.map_err(Arc::new).map_err(SeekError::Demuxer),
         }?;
 
@@ -285,6 +312,7 @@ impl Source for SymphoniaDecoder {
 
         // Force the iterator to decode the next packet.
         self.current_span_offset = usize::MAX;
+        self.seeked_past_end = false;
 
         // Symphonia does not seek to the exact position, it seeks to the closest keyframe.
         // If accurate seeking is required, fast-forward to the exact position.
@@ -363,6 +391,10 @@ impl Iterator for SymphoniaDecoder {
             if self.silence_samples_remaining > 0 {
                 self.silence_samples_remaining -= 1;
                 return Some(Sample::EQUILIBRIUM);
+            }
+
+            if self.seeked_past_end {
+                return None;
             }
 
             if self.current_span_offset >= self.buffer.len() {
