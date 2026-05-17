@@ -117,33 +117,33 @@ cargo-args = ["-Zunstable-options"]
 
 [dependencies]
 cpal = { git = "https://github.com/RustAudio/cpal", optional = true }
-dasp_sample = "0.11"
-claxon = { version = "0.4", optional = true }
-hound = { version = "3.5", optional = true }
-lewton = { version = "0.10", optional = true }
+dasp_sample = "0.11.0"
+claxon = { version = "0.4.3", optional = true }
+hound = { version = "3.5.1", optional = true }
+lewton = { version = "0.10.2", optional = true }
 minimp3_fixed = { version = "0.5.4", optional = true }
-symphonia = { version = "0.5.5", optional = true, default-features = false }
+symphonia = { version = "0.6.0", optional = true, default-features = false }
 crossbeam-channel = { version = "0.5.15", optional = true }
-thiserror = "2"
+thiserror = "2.0.18"
 
-rand = { version = "0.10", optional = true }
-rand_distr = { version = "0.6", optional = true }
-tracing = { version = "0.1.40", optional = true }
+rand = { version = "0.10.1", optional = true }
+rand_distr = { version = "0.6.0", optional = true }
+tracing = { version = "0.1.44", optional = true }
 
 atomic_float = { version = "1.1.0", optional = true }
-rtrb = { version = "0.3.2", optional = true }
+rtrb = { version = "0.3.4", optional = true }
 num-rational = "0.4.2"
 
-symphonia-adapter-libopus = { version = "0.2", optional = true }
+symphonia-adapter-libopus = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
-quickcheck = "1"
-rstest = "0.26"
-rstest_reuse = "0.7"
+quickcheck = "1.1.0"
+rstest = "0.26.1"
+rstest_reuse = "0.7.0"
 approx = "0.5.1"
-divan = "0.1.14"
-inquire = "0.9.3"
-symphonia-adapter-fdk-aac = "0.1"
+divan = "0.1.21"
+inquire = "0.9.4"
+symphonia-adapter-fdk-aac = "0.2.0"
 
 [[bench]]
 name = "effects"
