@@ -59,6 +59,11 @@ where
     pub fn into_inner(self) -> I {
         self.input
     }
+
+    /// Gets the volume for a given channel number. Will panic if channel number is invalid.
+    pub fn get_volume(&self, channel: usize) -> Float {
+        self.channel_volumes[channel]
+    }
 }
 
 impl<I> Iterator for ChannelVolume<I>

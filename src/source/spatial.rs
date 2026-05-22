@@ -117,3 +117,84 @@ where
         self.input.try_seek(pos)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{source::Spatial, Source};
+
+    struct TestCase {
+        emitter_pos: [f32; 3],
+        left_ear: [f32; 3],
+        right_ear: [f32; 3],
+        expected: [f32; 2],
+    }
+
+    #[test]
+    fn spatial_table_test() {
+        let test_cases = [
+            TestCase {
+                // left is one unit to the left of the emitter,
+                // right is one unit to the right of the emitter,
+                // so both should be equally loud
+                emitter_pos: [0.0, 0.0, 0.0],
+                left_ear: [-1.0, 0.0, 0.0],
+                right_ear: [1.0, 0.0, 0.0],
+                expected: [0.75, 0.75],
+            },
+            TestCase {
+                // Emitter is 10 units to the RIGHT of center.
+                // Right ear is closer (9 units) vs left ear (11 units).
+                emitter_pos: [10.0, 0.0, 0.0],
+                left_ear: [-1.0, 0.0, 0.0],
+                right_ear: [1.0, 0.0, 0.0],
+                expected: [
+                    1.0 / 121.0, // left: ~0.00826
+                    0.5 / 81.0,  // right: ~0.00617
+                                 // BUG: left channel is FARTHER (11 units), but also LOUDER (0.008264) than right (9 units) (0.006173).
+                ],
+            },
+            TestCase {
+                // Emitter is 10 units to the LEFT of center.
+                // Left ear is closer (9 units) vs right ear (11 units).
+                emitter_pos: [-10.0, 0.0, 0.0],
+                left_ear: [-1.0, 0.0, 0.0],
+                right_ear: [1.0, 0.0, 0.0],
+                expected: [
+                    0.5 / 81.0, // left: ~0.00617
+                    1.0 / 121.0, // right: ~0.00826
+                                // BUG: right channel is FARTHER (11 units), but also LOUDER (0.008264) than left (9 units) (0.006173).
+                ],
+            },
+        ];
+
+        for test_case in test_cases {
+            let spatial = Spatial::new(
+                crate::source::SineWave::new(440.0),
+                test_case.emitter_pos,
+                test_case.left_ear,
+                test_case.right_ear,
+            );
+            assert_eq!(spatial.channels().get(), 2);
+            assert_eq!(
+                spatial.input.get_volume(0),
+                test_case.expected[0],
+                "Failed test case with emitter_pos: {:?}, left_ear: {:?}, right_ear: {:?}, expected at left channel: {:?}, but got: {:?}",
+                test_case.emitter_pos,
+                test_case.left_ear,
+                test_case.right_ear,
+                test_case.expected[0],
+                spatial.input.get_volume(0)
+            );
+            assert_eq!(
+                spatial.input.get_volume(1),
+                test_case.expected[1],
+                "Failed test case with emitter_pos: {:?}, left_ear: {:?}, right_ear: {:?}, expected at right channel: {:?}, but got: {:?}",
+                test_case.emitter_pos,
+                test_case.left_ear,
+                test_case.right_ear,
+                test_case.expected[1],
+                spatial.input.get_volume(1)
+            );
+        }
+    }
+}
