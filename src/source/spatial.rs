@@ -120,18 +120,29 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::source::Spatial;
+    use crate::{source::Spatial, Float};
 
-    const EPSILON: f32 = 0.01;
+    const EPSILON: Float = 0.01;
 
     #[test]
     fn equidistant_emitter_has_equal_volume() {
         let emitter = [0.0, 0.0, 0.0];
         let left_ear = [-1.0, 0.0, 0.0];
         let right_ear = [1.0, 0.0, 0.0];
-        let spatial = Spatial::new(crate::source::SineWave::new(440.0), emitter, left_ear, right_ear);
-        let left = spatial.input.get_volume(0).expect("left channel should exist");
-        let right = spatial.input.get_volume(1).expect("right channel should exist");
+        let spatial = Spatial::new(
+            crate::source::SineWave::new(440.0),
+            emitter,
+            left_ear,
+            right_ear,
+        );
+        let left = spatial
+            .input
+            .get_volume(0)
+            .expect("left channel should exist");
+        let right = spatial
+            .input
+            .get_volume(1)
+            .expect("right channel should exist");
         assert!(
             (left - right).abs() < EPSILON,
             "Expected equal volume, got left: {left}, right: {right}"
@@ -143,9 +154,20 @@ mod tests {
         let emitter = [10.0, 0.0, 0.0];
         let left_ear = [-1.0, 0.0, 0.0];
         let right_ear = [1.0, 0.0, 0.0];
-        let spatial = Spatial::new(crate::source::SineWave::new(440.0), emitter, left_ear, right_ear);
-        let left = spatial.input.get_volume(0).expect("left channel should exist");
-        let right = spatial.input.get_volume(1).expect("right channel should exist");
+        let spatial = Spatial::new(
+            crate::source::SineWave::new(440.0),
+            emitter,
+            left_ear,
+            right_ear,
+        );
+        let left = spatial
+            .input
+            .get_volume(0)
+            .expect("left channel should exist");
+        let right = spatial
+            .input
+            .get_volume(1)
+            .expect("right channel should exist");
         assert!(
             right > left,
             "Expected right > left, got left: {left}, right: {right}"
@@ -157,9 +179,20 @@ mod tests {
         let emitter = [-10.0, 0.0, 0.0];
         let left_ear = [-1.0, 0.0, 0.0];
         let right_ear = [1.0, 0.0, 0.0];
-        let spatial = Spatial::new(crate::source::SineWave::new(440.0), emitter, left_ear, right_ear);
-        let left = spatial.input.get_volume(0).expect("left channel should exist");
-        let right = spatial.input.get_volume(1).expect("right channel should exist");
+        let spatial = Spatial::new(
+            crate::source::SineWave::new(440.0),
+            emitter,
+            left_ear,
+            right_ear,
+        );
+        let left = spatial
+            .input
+            .get_volume(0)
+            .expect("left channel should exist");
+        let right = spatial
+            .input
+            .get_volume(1)
+            .expect("right channel should exist");
         assert!(
             left > right,
             "Expected left > right, got left: {left}, right: {right}"
