@@ -135,14 +135,8 @@ mod tests {
             left_ear,
             right_ear,
         );
-        let left = spatial
-            .input
-            .get_volume(0)
-            .expect("left channel should exist");
-        let right = spatial
-            .input
-            .get_volume(1)
-            .expect("right channel should exist");
+        let left = spatial.input.volume(0).expect("left channel should exist");
+        let right = spatial.input.volume(1).expect("right channel should exist");
         assert!(
             (left - right).abs() < EPSILON,
             "Expected equal volume, got left: {left}, right: {right}"
@@ -160,14 +154,8 @@ mod tests {
             left_ear,
             right_ear,
         );
-        let left = spatial
-            .input
-            .get_volume(0)
-            .expect("left channel should exist");
-        let right = spatial
-            .input
-            .get_volume(1)
-            .expect("right channel should exist");
+        let left = spatial.input.volume(0).expect("left channel should exist");
+        let right = spatial.input.volume(1).expect("right channel should exist");
         assert!(
             right > left,
             "Expected right > left, got left: {left}, right: {right}"
@@ -185,14 +173,8 @@ mod tests {
             left_ear,
             right_ear,
         );
-        let left = spatial
-            .input
-            .get_volume(0)
-            .expect("left channel should exist");
-        let right = spatial
-            .input
-            .get_volume(1)
-            .expect("right channel should exist");
+        let left = spatial.input.volume(0).expect("left channel should exist");
+        let right = spatial.input.volume(1).expect("right channel should exist");
         assert!(
             left > right,
             "Expected left > right, got left: {left}, right: {right}"
