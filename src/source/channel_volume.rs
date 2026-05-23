@@ -60,9 +60,9 @@ where
         self.input
     }
 
-    /// Gets the volume for a given channel number. Will panic if channel number is invalid.
-    pub fn get_volume(&self, channel: usize) -> Float {
-        self.channel_volumes[channel]
+    /// Gets the volume for a given channel number. Returns `None` if channel number is invalid.
+    pub fn get_volume(&self, channel: usize) -> Option<Float> {
+        self.channel_volumes.get(channel).copied()
     }
 }
 

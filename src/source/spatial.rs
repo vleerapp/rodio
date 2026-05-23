@@ -120,81 +120,49 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{source::Spatial, Source};
+    use crate::source::Spatial;
 
-    struct TestCase {
-        emitter_pos: [f32; 3],
-        left_ear: [f32; 3],
-        right_ear: [f32; 3],
-        expected: [f32; 2],
+    const EPSILON: f32 = 0.01;
+
+    #[test]
+    fn equidistant_emitter_has_equal_volume() {
+        let emitter = [0.0, 0.0, 0.0];
+        let left_ear = [-1.0, 0.0, 0.0];
+        let right_ear = [1.0, 0.0, 0.0];
+        let spatial = Spatial::new(crate::source::SineWave::new(440.0), emitter, left_ear, right_ear);
+        let left = spatial.input.get_volume(0).expect("left channel should exist");
+        let right = spatial.input.get_volume(1).expect("right channel should exist");
+        assert!(
+            (left - right).abs() < EPSILON,
+            "Expected equal volume, got left: {left}, right: {right}"
+        );
     }
 
     #[test]
-    fn spatial_table_test() {
-        let test_cases = [
-            TestCase {
-                // left is one unit to the left of the emitter,
-                // right is one unit to the right of the emitter,
-                // so both should be equally loud
-                emitter_pos: [0.0, 0.0, 0.0],
-                left_ear: [-1.0, 0.0, 0.0],
-                right_ear: [1.0, 0.0, 0.0],
-                expected: [0.75, 0.75],
-            },
-            TestCase {
-                // Emitter is 10 units to the RIGHT of center.
-                // Right ear is closer (9 units) vs left ear (11 units).
-                emitter_pos: [10.0, 0.0, 0.0],
-                left_ear: [-1.0, 0.0, 0.0],
-                right_ear: [1.0, 0.0, 0.0],
-                expected: [
-                    1.0 / 121.0, // left: ~0.00826
-                    0.5 / 81.0,  // right: ~0.00617
-                                 // BUG: left channel is FARTHER (11 units), but also LOUDER (0.008264) than right (9 units) (0.006173).
-                ],
-            },
-            TestCase {
-                // Emitter is 10 units to the LEFT of center.
-                // Left ear is closer (9 units) vs right ear (11 units).
-                emitter_pos: [-10.0, 0.0, 0.0],
-                left_ear: [-1.0, 0.0, 0.0],
-                right_ear: [1.0, 0.0, 0.0],
-                expected: [
-                    0.5 / 81.0, // left: ~0.00617
-                    1.0 / 121.0, // right: ~0.00826
-                                // BUG: right channel is FARTHER (11 units), but also LOUDER (0.008264) than left (9 units) (0.006173).
-                ],
-            },
-        ];
+    fn emitter_to_the_right_is_louder_in_right_ear() {
+        let emitter = [10.0, 0.0, 0.0];
+        let left_ear = [-1.0, 0.0, 0.0];
+        let right_ear = [1.0, 0.0, 0.0];
+        let spatial = Spatial::new(crate::source::SineWave::new(440.0), emitter, left_ear, right_ear);
+        let left = spatial.input.get_volume(0).expect("left channel should exist");
+        let right = spatial.input.get_volume(1).expect("right channel should exist");
+        assert!(
+            right > left,
+            "Expected right > left, got left: {left}, right: {right}"
+        );
+    }
 
-        for test_case in test_cases {
-            let spatial = Spatial::new(
-                crate::source::SineWave::new(440.0),
-                test_case.emitter_pos,
-                test_case.left_ear,
-                test_case.right_ear,
-            );
-            assert_eq!(spatial.channels().get(), 2);
-            assert_eq!(
-                spatial.input.get_volume(0),
-                test_case.expected[0],
-                "Failed test case with emitter_pos: {:?}, left_ear: {:?}, right_ear: {:?}, expected at left channel: {:?}, but got: {:?}",
-                test_case.emitter_pos,
-                test_case.left_ear,
-                test_case.right_ear,
-                test_case.expected[0],
-                spatial.input.get_volume(0)
-            );
-            assert_eq!(
-                spatial.input.get_volume(1),
-                test_case.expected[1],
-                "Failed test case with emitter_pos: {:?}, left_ear: {:?}, right_ear: {:?}, expected at right channel: {:?}, but got: {:?}",
-                test_case.emitter_pos,
-                test_case.left_ear,
-                test_case.right_ear,
-                test_case.expected[1],
-                spatial.input.get_volume(1)
-            );
-        }
+    #[test]
+    fn emitter_to_the_left_is_louder_in_left_ear() {
+        let emitter = [-10.0, 0.0, 0.0];
+        let left_ear = [-1.0, 0.0, 0.0];
+        let right_ear = [1.0, 0.0, 0.0];
+        let spatial = Spatial::new(crate::source::SineWave::new(440.0), emitter, left_ear, right_ear);
+        let left = spatial.input.get_volume(0).expect("left channel should exist");
+        let right = spatial.input.get_volume(1).expect("right channel should exist");
+        assert!(
+            left > right,
+            "Expected left > right, got left: {left}, right: {right}"
+        );
     }
 }
