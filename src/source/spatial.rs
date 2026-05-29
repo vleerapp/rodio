@@ -57,9 +57,9 @@ where
         let max_diff = dist_sq(left_ear, right_ear).sqrt();
         let left_dist = left_dist_sq.sqrt();
         let right_dist = right_dist_sq.sqrt();
-        let left_diff_modifier = (((left_dist - right_dist) / max_diff + 1.0) / 4.0 + 0.5).min(1.0);
+        let left_diff_modifier = (((right_dist - left_dist) / max_diff + 1.0) / 4.0 + 0.5).min(1.0);
         let right_diff_modifier =
-            (((right_dist - left_dist) / max_diff + 1.0) / 4.0 + 0.5).min(1.0);
+            (((left_dist - right_dist) / max_diff + 1.0) / 4.0 + 0.5).min(1.0);
         let left_dist_modifier = (1.0 / left_dist_sq).min(1.0);
         let right_dist_modifier = (1.0 / right_dist_sq).min(1.0);
         self.input
@@ -115,5 +115,69 @@ where
     #[inline]
     fn try_seek(&mut self, pos: Duration) -> Result<(), SeekError> {
         self.input.try_seek(pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{source::Spatial, Float};
+
+    const EPSILON: Float = 0.01;
+
+    #[test]
+    fn equidistant_emitter_has_equal_volume() {
+        let emitter = [0.0, 0.0, 0.0];
+        let left_ear = [-1.0, 0.0, 0.0];
+        let right_ear = [1.0, 0.0, 0.0];
+        let spatial = Spatial::new(
+            crate::source::SineWave::new(440.0),
+            emitter,
+            left_ear,
+            right_ear,
+        );
+        let left = spatial.input.volume(0).expect("left channel should exist");
+        let right = spatial.input.volume(1).expect("right channel should exist");
+        assert!(
+            (left - right).abs() < EPSILON,
+            "Expected equal volume, got left: {left}, right: {right}"
+        );
+    }
+
+    #[test]
+    fn emitter_to_the_right_is_louder_in_right_ear() {
+        let emitter = [10.0, 0.0, 0.0];
+        let left_ear = [-1.0, 0.0, 0.0];
+        let right_ear = [1.0, 0.0, 0.0];
+        let spatial = Spatial::new(
+            crate::source::SineWave::new(440.0),
+            emitter,
+            left_ear,
+            right_ear,
+        );
+        let left = spatial.input.volume(0).expect("left channel should exist");
+        let right = spatial.input.volume(1).expect("right channel should exist");
+        assert!(
+            right > left,
+            "Expected right > left, got left: {left}, right: {right}"
+        );
+    }
+
+    #[test]
+    fn emitter_to_the_left_is_louder_in_left_ear() {
+        let emitter = [-10.0, 0.0, 0.0];
+        let left_ear = [-1.0, 0.0, 0.0];
+        let right_ear = [1.0, 0.0, 0.0];
+        let spatial = Spatial::new(
+            crate::source::SineWave::new(440.0),
+            emitter,
+            left_ear,
+            right_ear,
+        );
+        let left = spatial.input.volume(0).expect("left channel should exist");
+        let right = spatial.input.volume(1).expect("right channel should exist");
+        assert!(
+            left > right,
+            "Expected left > right, got left: {left}, right: {right}"
+        );
     }
 }
