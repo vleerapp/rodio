@@ -13,14 +13,19 @@ rust-version = "1.89"
 [features]
 # Default feature set provides audio playback and common format support
 default = [
-    "playback",
-    "recording",
-    "flac",
-    "mp3",
-    "mp4",
-    "vorbis",
-    "wav",
-    "dither",
+  # Core functionality
+  "playback",
+  "recording",
+  # Audio format support
+  "flac",
+  "mp3",
+  "mp4",
+  "vorbis",
+  "wav",
+  # Platform-specific backends
+  "pulseaudio",
+  # Performance features
+  "simd",
 ]
 
 # Core functionality features
@@ -48,8 +53,10 @@ noise = ["rand", "rand_distr"]
 # Perform all calculations with 64-bit floats (instead of 32)
 64bit = []
 # Real-time audio thread scheduling
+# With the realtime-dbus feature, rtkit arranges the necessary limits over D-Bus on typical desktop systems.
+# With the plain realtime feature, you must ensure that rtprio is granted yourself.
+# See: https://github.com/RustAudio/cpal#alsa-real-time-priority-promotion
 realtime = ["cpal/realtime"]
-# D-Bus/rtkit support on top of `realtime` for RT scheduling on Linux/BSD desktop systems
 realtime-dbus = ["cpal/realtime-dbus"]
 # SIMD-accelerated audio processing
 simd = ["symphonia/opt-simd"]

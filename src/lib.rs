@@ -138,31 +138,48 @@
 //! to avoid adding extra crates to your binary.
 //! See the [available feature flags](https://docs.rs/crate/rodio/latest/features) for all options.
 //!
-//! ## Optional Features
+//! ## Feature Flags
 //!
-//! Rodio provides several optional features that are guarded with feature gates.
+//! ### Core
 //!
-//! ### Feature "tracing"
+//! | Feature | Description |
+//! |---------|-------------|
+//! | `playback` **(default)** | Audio playback |
+//! | `recording` **(default)** | Microphone input |
+//! | `wav_output` | Write decoded audio to a WAV file |
+//! | `tracing` | Record stream errors as `tracing` events instead of printing to stderr |
+//! | `experimental` | Experimental APIs backed by atomic floating-point operations |
 //!
-//! The "tracing" feature replaces the print to stderr when a stream error happens with a
-//! recording an error event with tracing.
+//! ### Performance
 //!
-//! ### Feature "noise"
+//! | Feature | Description |
+//! |---------|-------------|
+//! | `simd` **(default)** | SIMD-accelerated decoding |
+//! | `64bit` | Use `f64` instead of `f32` for all samples and internal math |
+//! | `realtime` | Real-time thread scheduling priority (you must grant `rtprio` yourself) |
+//! | `realtime-dbus` | Like `realtime`, but uses D-Bus/rtkit to arrange limits automatically on desktop Linux |
 //!
-//! The "noise" feature adds support for white and pink noise sources. This feature requires the
-//! "rand" crate.
+//! ### Audio generation
 //!
-//! ### Feature "playback"
+//! | Feature | Description |
+//! |---------|-------------|
+//! | `noise` | White and pink noise sources |
+//! | `dither` | Dithering; implies `noise` |
 //!
-//! The "playback" feature adds support for playing audio. This feature requires the "cpal" crate.
+//! ### Platform backends
 //!
-//! ### Feature "64bit"
+//! | Feature | Platform | Description |
+//! |---------|----------|-------------|
+//! | `pulseaudio` **(default)** | Linux | PulseAudio backend; also works on PipeWire systems via `pipewire-pulse`, with ALSA as fallback |
+//! | `asio` | Windows | ASIO low-latency backend |
+//! | `jack` | Linux/macOS/Windows | JACK Audio Connection Kit |
+//! | `pipewire` | Linux | Native PipeWire backend |
+//! | `audio-worklet` | Wasm | Audio Worklet backend |
+//! | `wasm-bindgen` | Wasm | wasm-bindgen Wasm backend |
 //!
-//! The "64bit" feature enables 64-bit sample precision using `f64` for audio samples and most
-//! internal calculations. By default, rodio uses 32-bit floats (`f32`), which offers better
-//! performance and is sufficient for most use cases. The 64-bit mode addresses precision drift
-//! when chaining many audio operations together and in long-running signal generators where
-//! phase errors compound over time.
+//! ### Audio format features
+//!
+//! See the [Decoder Backends](#decoder-backends) section above.
 //!
 //! ## How it works under the hood
 //!
