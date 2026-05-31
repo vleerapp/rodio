@@ -155,9 +155,14 @@
 //! | Feature | Description |
 //! |---------|-------------|
 //! | `simd` **(default)** | SIMD-accelerated decoding |
-//! | `64bit` | Use `f64` instead of `f32` for all samples and internal math |
+//! | `64bit` | Use `f64` instead of `f32` for all samples and internal math [^1] |
 //! | `realtime` | Real-time thread scheduling priority (you must grant `rtprio` yourself) |
 //! | `realtime-dbus` | Like `realtime`, but uses D-Bus/rtkit to arrange limits automatically on desktop Linux |
+//!
+//! [^1]: By default, rodio uses 32-bit floats (`f32`), which offers better performance and is
+//! sufficient for most use cases. The 64-bit mode addresses precision drift when chaining many
+//! audio operations together, in long-running signal generators where phase errors compound
+//! over time, and during resampling where rounding errors accumulate.
 //!
 //! ### Audio generation
 //!
