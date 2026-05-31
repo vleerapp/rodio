@@ -80,6 +80,7 @@ use std::time::Duration;
 use super::{reset_seek_span_tracking, SeekError};
 use crate::{
     common::{ChannelCount, Sample, SampleRate},
+    math::gcd,
     Float, Source,
 };
 
@@ -97,15 +98,6 @@ pub use builder::{
 
 /// Maximum for optimized fixed-ratio resampling: 44.1 and 384 kHz (147:1280).
 const MAX_FIXED_RATIO: u32 = 1280;
-
-pub(super) fn gcd(mut a: u32, mut b: u32) -> u32 {
-    while b != 0 {
-        let r = a % b;
-        a = b;
-        b = r;
-    }
-    a
-}
 
 /// Resamples an audio source to a target sample rate using Rubato.
 #[derive(Debug)]
@@ -418,7 +410,6 @@ where
         self.pending_recreate = false;
         let input_span_len = self.resampler().input().current_span_len();
 
-        // Use field-level borrow so we can simultaneously access self.cached_input_span_len.
         match self.inner.as_mut().unwrap() {
             ResampleInner::Passthrough {
                 input_span_pos: input_samples_consumed,
@@ -637,9 +628,6 @@ mod tests {
 
     /// Multi-span test source.
     ///
-    /// `span` is advanced eagerly — the moment the last sample of span N is returned,
-    /// `span` becomes N+1. This keeps `current_span_len()` a simple array lookup and
-    /// makes the exhausted state (`span == spans.len()`) explicit.
     /// Build with [`TestSource::new`] and extend with [`.chain()`](TestSource::chain).
     struct TestSource {
         spans: Vec<TestSpan>,
@@ -669,8 +657,7 @@ mod tests {
             self
         }
 
-        /// Returns the active span for metadata queries, falling back to the last span
-        /// once the source is exhausted so rate/channels remain defined.
+        /// Returns the active span for metadata queries.
         fn current_span(&self) -> &TestSpan {
             self.spans
                 .get(self.span)
@@ -709,18 +696,19 @@ mod tests {
         }
 
         fn total_duration(&self) -> Option<Duration> {
-            let secs: f64 = self
-                .spans
-                .iter()
-                .map(|s| {
-                    let frames = s.samples.len() / s.channels.get() as usize;
-                    frames as f64 / s.rate.get() as f64
-                })
-                .sum();
-            Some(Duration::from_secs_f64(secs))
+            Some(
+                self.spans
+                    .iter()
+                    .map(|s| {
+                        let frames = s.samples.len() / s.channels.get() as usize;
+                        Duration::from_secs_f64(frames as f64 / s.rate.get() as f64)
+                    })
+                    .sum(),
+            )
         }
 
         fn try_seek(&mut self, position: Duration) -> Result<(), SeekError> {
+            let position = self.total_duration().map_or(position, |d| position.min(d));
             let mut remaining = position.as_secs_f64();
             for (i, span) in self.spans.iter().enumerate() {
                 let frames = span.samples.len() / span.channels.get() as usize;
@@ -740,8 +728,7 @@ mod tests {
                 }
                 remaining -= span_dur;
             }
-            // Empty spans vec — nothing to seek.
-            Ok(())
+            unreachable!("TestSource always has at least one span")
         }
     }
 
@@ -864,12 +851,6 @@ mod tests {
         }
     }
 
-    /// Without the `already_read` fix, `total_input_frames` (never reset at same-format
-    /// span boundaries) was used instead of `input_samples_consumed` (reset at each
-    /// boundary). On the second span that caused the span cap to evaluate to zero
-    /// immediately, so Rubato would error on a zero-length partial chunk and
-    /// `next_sample` would return `None` early — producing roughly half the expected
-    /// output.
     #[test]
     fn test_span_boundary_same_format() {
         let span_frames = 100usize;

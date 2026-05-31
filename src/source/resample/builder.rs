@@ -222,10 +222,7 @@ pub enum ResampleConfig {
         sinc_len: usize,
         /// Number of entries per tap in the precomputed sinc filter lookup table.
         ///
-        /// A higher value means finer granularity between adjacent table entries, which reduces
-        /// the interpolation error when using [`Sinc::Linear`] or [`Sinc::Quadratic`]. For
-        /// [`Sinc::Cubic`], fewer entries are needed because the polynomial follows the curvature
-        /// of the sinc function more closely. See [`Sinc::Linear`] for a detailed explanation.
+        /// See [`SincConfigBuilder::oversampling_factor`] for details.
         oversampling_factor: usize,
         /// Interpolation type for filter table lookup
         interpolation: Sinc,

@@ -200,14 +200,11 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
             };
 
             // When the span cap brings needed_input to zero and the buffer is empty,
-            // probe the source to distinguish a genuinely exhausted single-span source
-            // from a span boundary in a multi-span source. For multi-span sources the
-            // outer Resample::next() will have updated cached_input_span_len before the
-            // next call, so this probe only fires for truly exhausted sources.
-            if needed_input == 0 && !self.input_exhausted && self.input_frame_count == 0 {
-                if self.input.next().is_none() {
-                    self.input_exhausted = true;
-                }
+            // check whether the source is truly exhausted (single-span done) or just
+            // at a same-format span boundary. For the latter, Resample::next() will have
+            // refreshed cached_input_span_len before the next call.
+            if needed_input == 0 && !self.input_exhausted {
+                self.input_exhausted = self.input.is_exhausted();
             }
 
             // When exhausted, use a full chunk so zero-padding flushes the filter tail.
@@ -216,15 +213,7 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
             } else {
                 needed_input
             };
-            let frames_before = self.input_frame_count;
             self.fill_input_buffer(fill_target, num_channels);
-
-            // We can process with fewer frames than needed using partial_len when the input is
-            // exhausted. If we don't have enough input and more is coming, wait.
-            let made_progress = self.input_frame_count > frames_before;
-            if self.input_frame_count < needed_input && !self.input_exhausted && made_progress {
-                continue;
-            }
 
             let actual_frames = self.input_frame_count;
 
@@ -245,7 +234,6 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
             };
 
             let (frames_in, frames_out) = {
-                // InterleavedSlice is a zero-cost abstraction - no heap allocation occurs here
                 let input_adapter =
                     InterleavedSlice::new(&self.input_buffer, num_channels, actual_frames)
                         .inspect_err(|_e| {
@@ -293,12 +281,6 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
                 .ceil() as usize
                 * num_channels;
 
-            // Shift remaining input samples to beginning of buffer
-            if actual_consumed < self.input_frame_count {
-                let src_start = actual_consumed * num_channels;
-                let src_end = self.input_frame_count * num_channels;
-                self.input_buffer.copy_within(src_start..src_end, 0);
-            }
             self.input_frame_count -= actual_consumed;
 
             self.output_buffer.reset(frames_out * num_channels);
@@ -455,7 +437,7 @@ impl<I: Source> RubatoFftResample<I> {
         let channels = input.channels();
 
         // Determine input chunk size - must be multiple of the GCD-reduced denominator
-        let g = super::gcd(target_rate.get(), source_rate.get());
+        let g = crate::math::gcd(target_rate.get(), source_rate.get());
         let den = (source_rate.get() / g) as usize;
         let input_chunk_size = ((chunk_size / den) + 1) * den;
 
