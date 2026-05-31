@@ -220,7 +220,12 @@ pub enum ResampleConfig {
     Sinc {
         /// Length of the windowed sinc interpolation filter
         sinc_len: usize,
-        /// The number of intermediate points to use for interpolation
+        /// Number of entries per tap in the precomputed sinc filter lookup table.
+        ///
+        /// A higher value means finer granularity between adjacent table entries, which reduces
+        /// the interpolation error when using [`Sinc::Linear`] or [`Sinc::Quadratic`]. For
+        /// [`Sinc::Cubic`], fewer entries are needed because the polynomial follows the curvature
+        /// of the sinc function more closely. See [`Sinc::Linear`] for a detailed explanation.
         oversampling_factor: usize,
         /// Interpolation type for filter table lookup
         interpolation: Sinc,
@@ -385,9 +390,13 @@ impl SincConfigBuilder {
         self
     }
 
-    /// Set oversampling factor (typical range: 64-4096).
+    /// Set the number of entries per tap in the precomputed sinc filter lookup table
+    /// (typical range: 64-4096).
     ///
-    /// Higher values improve interpolation accuracy but increase memory usage.
+    /// A higher value packs more entries into the table, so adjacent entries are closer together
+    /// and interpolation between them incurs less error. This matters most with
+    /// [`Sinc::Linear`] and [`Sinc::Quadratic`]; [`Sinc::Cubic`] achieves comparable accuracy
+    /// with a smaller table. Increases memory usage proportionally.
     pub fn oversampling_factor(mut self, factor: NonZero<usize>) -> Self {
         self.oversampling_factor = factor.get();
         self

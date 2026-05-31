@@ -1,7 +1,6 @@
 //! Rubato resampler wrapper and implementations.
 
 use dasp_sample::Sample as _;
-use num_rational::Ratio;
 use rubato::{audioadapter_buffers::direct::InterleavedSlice, Resampler};
 
 use crate::source::{ChannelCount, SampleRate, Source};
@@ -166,7 +165,7 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
         }
     }
 
-    pub fn next_sample(&mut self) -> Option<Sample> {
+    pub fn next_sample(&mut self, cached_input_span_len: Option<usize>) -> Option<Sample> {
         let num_channels = self.channels.get() as usize;
         loop {
             // If we have buffered output, return it
@@ -184,10 +183,41 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
                 return None;
             }
 
-            // Fill input buffer, flushing with zeros if input is exhausted
-            let needed_input = self.resampler.input_frames_next();
+            // Fill input buffer, flushing with zeros if input is exhausted.
+            // Cap to the span boundary so we never read into the next span's samples,
+            // which may have a different channel count or sample rate.
+            let original_needed = self.resampler.input_frames_next();
+            let needed_input = if let Some(span_len) = cached_input_span_len {
+                let span_frames = span_len / num_channels;
+                // input_samples_consumed resets to 0 at each span boundary, so this
+                // stays span-relative even when the resampler processes multiple spans.
+                let already_read =
+                    self.input_samples_consumed / num_channels + self.real_frames_in_buffer;
+                let remaining = span_frames.saturating_sub(already_read);
+                original_needed.min(self.input_frame_count + remaining)
+            } else {
+                original_needed
+            };
+
+            // When the span cap brings needed_input to zero and the buffer is empty,
+            // probe the source to distinguish a genuinely exhausted single-span source
+            // from a span boundary in a multi-span source. For multi-span sources the
+            // outer Resample::next() will have updated cached_input_span_len before the
+            // next call, so this probe only fires for truly exhausted sources.
+            if needed_input == 0 && !self.input_exhausted && self.input_frame_count == 0 {
+                if self.input.next().is_none() {
+                    self.input_exhausted = true;
+                }
+            }
+
+            // When exhausted, use a full chunk so zero-padding flushes the filter tail.
+            let fill_target = if self.input_exhausted {
+                original_needed
+            } else {
+                needed_input
+            };
             let frames_before = self.input_frame_count;
-            self.fill_input_buffer(needed_input, num_channels);
+            self.fill_input_buffer(fill_target, num_channels);
 
             // We can process with fewer frames than needed using partial_len when the input is
             // exhausted. If we don't have enough input and more is coming, wait.
@@ -198,8 +228,11 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
 
             let actual_frames = self.input_frame_count;
 
+            // Use original_needed (pre-cap) so that partial_len is signalled to Rubato
+            // whenever we have fewer frames than a full chunk, regardless of whether the
+            // shortfall is due to source exhaustion or a span boundary cap.
             let indexing;
-            let indexing_ref = if actual_frames < needed_input {
+            let indexing_ref = if actual_frames < original_needed {
                 indexing = rubato::Indexing {
                     input_offset: 0,
                     output_offset: 0,
@@ -214,7 +247,12 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
             let (frames_in, frames_out) = {
                 // InterleavedSlice is a zero-cost abstraction - no heap allocation occurs here
                 let input_adapter =
-                    InterleavedSlice::new(&self.input_buffer, num_channels, actual_frames).ok()?;
+                    InterleavedSlice::new(&self.input_buffer, num_channels, actual_frames)
+                        .inspect_err(|_e| {
+                            #[cfg(feature = "tracing")]
+                            tracing::error!("resampler: failed to create input adapter: {_e}");
+                        })
+                        .ok()?;
 
                 let num_frames = self.output_buffer.capacity() / num_channels;
                 let mut output_adapter = InterleavedSlice::new_mut(
@@ -222,10 +260,18 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
                     num_channels,
                     num_frames,
                 )
+                .inspect_err(|_e| {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!("resampler: failed to create output adapter: {_e}");
+                })
                 .ok()?;
 
                 self.resampler
                     .process_into_buffer(&input_adapter, &mut output_adapter, indexing_ref)
+                    .inspect_err(|_e| {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!("resampler: processing failed: {_e}");
+                    })
                     .ok()?
             };
 
@@ -264,8 +310,12 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
                 self.output_delay_remaining -= samples_to_skip;
             }
 
-            // Cap output to cut off filter artifacts once input is exhausted
-            if self.input_exhausted && self.expected_output_samples > 0 {
+            // Cap output whenever a partial chunk was processed (span boundary or
+            // exhaustion) or once all input is gone. Rubato internally zero-pads a
+            // partial chunk to a full output chunk, so without the cap the output
+            // would exceed expected_output_samples.
+            if (self.input_exhausted || indexing_ref.is_some()) && self.expected_output_samples > 0
+            {
                 let remaining = self
                     .expected_output_samples
                     .saturating_sub(self.total_output_samples);
@@ -404,12 +454,10 @@ impl<I: Source> RubatoFftResample<I> {
         let source_rate = input.sample_rate();
         let channels = input.channels();
 
-        // Calculate the GCD-reduced ratio
-        let ratio = Ratio::new(target_rate.get(), source_rate.get());
-        let (_num, den) = ratio.into_raw();
-
-        // Determine input chunk size - must be multiple of denominator
-        let input_chunk_size = ((chunk_size / den as usize) + 1) * den as usize;
+        // Determine input chunk size - must be multiple of the GCD-reduced denominator
+        let g = super::gcd(target_rate.get(), source_rate.get());
+        let den = (source_rate.get() / g) as usize;
+        let input_chunk_size = ((chunk_size / den) + 1) * den;
 
         let resampler = rubato::Fft::new(
             source_rate.get() as usize,

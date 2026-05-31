@@ -77,9 +77,6 @@
 
 use std::time::Duration;
 
-use ::rubato::Resampler as _;
-use num_rational::Ratio;
-
 use super::{reset_seek_span_tracking, SeekError};
 use crate::{
     common::{ChannelCount, Sample, SampleRate},
@@ -101,6 +98,15 @@ pub use builder::{
 /// Maximum for optimized fixed-ratio resampling: 44.1 and 384 kHz (147:1280).
 const MAX_FIXED_RATIO: u32 = 1280;
 
+pub(super) fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
 /// Resamples an audio source to a target sample rate using Rubato.
 #[derive(Debug)]
 pub struct Resample<I>
@@ -112,6 +118,10 @@ where
     target_rate: SampleRate,
     config: ResampleConfig,
     cached_input_span_len: Option<usize>,
+    // True when a format change was detected at a span boundary but the output buffer still
+    // has samples from the old format. Recreation is deferred until the buffer is drained so
+    // fill_input_buffer never reads the next span's samples with the wrong channel count.
+    pending_recreate: bool,
 }
 
 impl<I> Clone for Resample<I>
@@ -155,6 +165,7 @@ where
             target_rate,
             config,
             cached_input_span_len,
+            pending_recreate: false,
         }
     }
 
@@ -175,7 +186,6 @@ where
                 source_rate,
             }
         } else {
-            let ratio = Ratio::new(target_rate.get(), source_rate.get());
             match config {
                 ResampleConfig::Poly { degree, chunk_size } => {
                     let resampler =
@@ -193,7 +203,10 @@ where
                     chunk_size,
                     sub_chunks,
                 } => {
-                    if *ratio.numer() <= MAX_FIXED_RATIO && *ratio.denom() <= MAX_FIXED_RATIO {
+                    let g = gcd(target_rate.get(), source_rate.get());
+                    let numer = target_rate.get() / g;
+                    let denom = source_rate.get() / g;
+                    if numer <= MAX_FIXED_RATIO && denom <= MAX_FIXED_RATIO {
                         // Use FFT resampler for optimal performance
                         let resampler =
                             RubatoFftResample::new(source, target_rate, *chunk_size, *sub_chunks)
@@ -223,10 +236,13 @@ where
                     f_cutoff,
                     chunk_size,
                 } => {
-                    if *ratio.numer() <= MAX_FIXED_RATIO && *ratio.denom() <= MAX_FIXED_RATIO {
+                    let g = gcd(target_rate.get(), source_rate.get());
+                    let numer = target_rate.get() / g;
+                    let denom = source_rate.get() / g;
+                    if numer <= MAX_FIXED_RATIO && denom <= MAX_FIXED_RATIO {
                         // Fixed ratio without FFT - use Sinc::Nearest optimization
                         // Set oversampling_factor to match the ratio for optimal performance
-                        let ratio = *ratio.numer().max(ratio.denom()) as usize;
+                        let ratio = numer.max(denom) as usize;
                         let resampler = RubatoAsyncResample::new_sinc(
                             source,
                             target_rate,
@@ -271,19 +287,13 @@ where
     /// Returns a reference to the inner source.
     #[inline]
     pub fn inner(&self) -> &I {
-        match self.inner.as_ref().unwrap() {
-            ResampleInner::Passthrough { source, .. } => source,
-            ResampleInner::Poly(resampler) => &resampler.input,
-            ResampleInner::Sinc(resampler) => &resampler.input,
-            #[cfg(feature = "rubato-fft")]
-            ResampleInner::Fft(resampler) => &resampler.input,
-        }
+        self.resampler().input()
     }
 
     /// Returns a mutable reference to the inner source.
     #[inline]
     pub fn inner_mut(&mut self) -> &mut I {
-        match self.inner.as_mut().unwrap() {
+        match self.resampler_mut() {
             ResampleInner::Passthrough { source, .. } => source,
             ResampleInner::Poly(resampler) => &mut resampler.input,
             ResampleInner::Sinc(resampler) => &mut resampler.input,
@@ -332,38 +342,32 @@ where
 {
     #[inline]
     fn current_span_len(&self) -> Option<usize> {
-        let (
-            input_span_len,
-            input_sample_rate,
-            input_exhausted,
-            output_has_samples,
-            output_len,
-            output_frames_next,
-        ) = match self.inner.as_ref().unwrap() {
-            ResampleInner::Passthrough { source, .. } => return source.current_span_len(),
-            ResampleInner::Poly(resampler) | ResampleInner::Sinc(resampler) => (
-                resampler.input.current_span_len(),
-                resampler.input.sample_rate(),
-                resampler.input.is_exhausted(),
-                resampler.output_has_samples(),
-                resampler.output_len(),
-                resampler.resampler.output_frames_next(),
-            ),
-            #[cfg(feature = "rubato-fft")]
-            ResampleInner::Fft(resampler) => (
-                resampler.input.current_span_len(),
-                resampler.input.sample_rate(),
-                resampler.input.is_exhausted(),
-                resampler.output_has_samples(),
-                resampler.output_len(),
-                resampler.resampler.output_frames_next(),
-            ),
-        };
+        let (input_span_len, input_sample_rate, input_exhausted, output_has_samples, output_len) =
+            match self.resampler() {
+                ResampleInner::Passthrough { source, .. } => return source.current_span_len(),
+                ResampleInner::Poly(resampler) | ResampleInner::Sinc(resampler) => (
+                    resampler.input.current_span_len(),
+                    resampler.input.sample_rate(),
+                    resampler.input.is_exhausted(),
+                    resampler.output_has_samples(),
+                    resampler.output_len(),
+                ),
+                #[cfg(feature = "rubato-fft")]
+                ResampleInner::Fft(resampler) => (
+                    resampler.input.current_span_len(),
+                    resampler.input.sample_rate(),
+                    resampler.input.is_exhausted(),
+                    resampler.output_has_samples(),
+                    resampler.output_len(),
+                ),
+            };
 
-        let ratio = Ratio::new(self.sample_rate().get(), input_sample_rate.get());
-        if ratio.is_integer() {
+        let g = gcd(self.sample_rate().get(), input_sample_rate.get());
+        let numer = self.sample_rate().get() / g;
+        let denom = input_sample_rate.get() / g;
+        if denom == 1 {
             // Integer upsampling (2x, 3x, etc.) - always exact and frame-aligned
-            input_span_len.map(|len| *ratio.numer() as usize * len)
+            input_span_len.map(|len| numer as usize * len)
         } else {
             // When the ratio contains a fraction, we cannot choose the floor or ceiling
             // arbitrarily, because the resampler may produce either based on its internal state
@@ -374,9 +378,9 @@ where
                 // End state: we are at the end of our buffer and the source is exhausted
                 Some(0)
             } else {
-                // Initial state: our buffer is empty until the first call to next() loads it with
-                // resampled samples. Return the size of the next buffer.
-                Some(output_frames_next * self.channels().get() as usize)
+                // Initial state: buffer is empty, actual output count is unknown until the first
+                // process_into_buffer call. Return one frame so consumers recheck promptly.
+                Some(self.channels().get() as usize)
             }
         }
     }
@@ -411,8 +415,10 @@ where
             }
         }
 
+        self.pending_recreate = false;
         let input_span_len = self.resampler().input().current_span_len();
 
+        // Use field-level borrow so we can simultaneously access self.cached_input_span_len.
         match self.inner.as_mut().unwrap() {
             ResampleInner::Passthrough {
                 input_span_pos: input_samples_consumed,
@@ -456,39 +462,60 @@ where
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        let sample = match self.inner.as_mut().unwrap() {
+        // If a format change was detected at the previous span boundary, wait until the
+        // output buffer is fully drained before recreating the resampler. This guarantees
+        // that fill_input_buffer only ever reads from the current span.
+        if self.pending_recreate {
+            let output_empty = match self.resampler() {
+                ResampleInner::Passthrough { .. } => true,
+                ResampleInner::Poly(r) | ResampleInner::Sinc(r) => !r.output_has_samples(),
+                #[cfg(feature = "rubato-fft")]
+                ResampleInner::Fft(r) => !r.output_has_samples(),
+            };
+            if output_empty {
+                let source = self.inner.take().unwrap().into_inner();
+                self.inner = Some(Self::create_resampler(
+                    source,
+                    self.target_rate,
+                    &self.config,
+                ));
+                self.pending_recreate = false;
+            }
+        }
+
+        let cached = self.cached_input_span_len;
+        let sample = match self.resampler_mut() {
             ResampleInner::Passthrough { source, .. } => source.next()?,
-            ResampleInner::Poly(resampler) => resampler.next_sample()?,
-            ResampleInner::Sinc(resampler) => resampler.next_sample()?,
+            ResampleInner::Poly(resampler) => resampler.next_sample(cached)?,
+            ResampleInner::Sinc(resampler) => resampler.next_sample(cached)?,
             #[cfg(feature = "rubato-fft")]
-            ResampleInner::Fft(resampler) => resampler.next_sample()?,
+            ResampleInner::Fft(resampler) => resampler.next_sample(cached)?,
         };
 
         // If input reports no span length, parameters are stable by contract
-        let input_span_len = self.inner.as_ref().unwrap().input().current_span_len();
+        let input_span_len = self.resampler().input().current_span_len();
         if input_span_len.is_none() {
             return Some(sample);
         }
 
-        let (expected_channels, expected_rate, samples_consumed) =
-            match self.inner.as_mut().unwrap() {
-                ResampleInner::Passthrough {
-                    input_span_pos: input_samples_consumed,
-                    channels,
-                    source_rate,
-                    ..
-                } => {
-                    *input_samples_consumed += 1;
-                    (*channels, *source_rate, *input_samples_consumed)
-                }
-                ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
-                    (r.channels, r.source_rate, r.input_samples_consumed)
-                }
-                #[cfg(feature = "rubato-fft")]
-                ResampleInner::Fft(r) => (r.channels, r.source_rate, r.input_samples_consumed),
-            };
+        let (expected_channels, expected_rate, samples_consumed) = match self.resampler_mut() {
+            ResampleInner::Passthrough {
+                input_span_pos: input_samples_consumed,
+                channels,
+                source_rate,
+                ..
+            } => {
+                *input_samples_consumed += 1;
+                (*channels, *source_rate, *input_samples_consumed)
+            }
+            ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
+                (r.channels, r.source_rate, r.input_samples_consumed)
+            }
+            #[cfg(feature = "rubato-fft")]
+            ResampleInner::Fft(r) => (r.channels, r.source_rate, r.input_samples_consumed),
+        };
 
-        let input = self.inner.as_ref().unwrap().input();
+        let input = self.resampler().input();
         let (at_boundary, parameters_changed) = Self::detect_boundary(
             self.cached_input_span_len,
             samples_consumed,
@@ -503,16 +530,12 @@ where
             self.cached_input_span_len = input_span_len;
 
             if parameters_changed {
-                // Recreate resampler - new resampler will have counters reset to 0
-                let source = self.inner.take().unwrap().into_inner();
-                self.inner = Some(Self::create_resampler(
-                    source,
-                    self.target_rate,
-                    &self.config,
-                ));
+                // Defer recreation until the output buffer is drained (handled above at the
+                // top of the next next() call) so no cross-span reads occur.
+                self.pending_recreate = true;
             } else {
                 // Just crossed boundary without parameter change, reset counter
-                match self.inner.as_mut().unwrap() {
+                match self.resampler_mut() {
                     ResampleInner::Passthrough {
                         input_span_pos: input_samples_consumed,
                         ..
@@ -535,7 +558,7 @@ where
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (input_hint, source_rate, buffered_remaining) = match self.inner.as_ref().unwrap() {
+        let (input_hint, source_rate, buffered_remaining) = match self.resampler() {
             ResampleInner::Passthrough { source, .. } => return source.size_hint(),
             ResampleInner::Poly(resampler) | ResampleInner::Sinc(resampler) => {
                 let input_hint = resampler.input.size_hint();
@@ -606,21 +629,52 @@ mod tests {
         }
     }
 
-    struct TestSource {
+    struct TestSpan {
         samples: Vec<Sample>,
-        index: usize,
-        sample_rate: SampleRate,
+        rate: SampleRate,
         channels: ChannelCount,
     }
 
+    /// Multi-span test source.
+    ///
+    /// `span` is advanced eagerly — the moment the last sample of span N is returned,
+    /// `span` becomes N+1. This keeps `current_span_len()` a simple array lookup and
+    /// makes the exhausted state (`span == spans.len()`) explicit.
+    /// Build with [`TestSource::new`] and extend with [`.chain()`](TestSource::chain).
+    struct TestSource {
+        spans: Vec<TestSpan>,
+        span: usize,
+        offset: usize,
+    }
+
     impl TestSource {
-        fn new(samples: Vec<Sample>, sample_rate: SampleRate, channels: ChannelCount) -> Self {
+        fn new(samples: Vec<Sample>, rate: SampleRate, channels: ChannelCount) -> Self {
             Self {
-                samples,
-                index: 0,
-                sample_rate,
-                channels,
+                spans: vec![TestSpan {
+                    samples,
+                    rate,
+                    channels,
+                }],
+                span: 0,
+                offset: 0,
             }
+        }
+
+        fn chain(mut self, samples: Vec<Sample>, rate: SampleRate, channels: ChannelCount) -> Self {
+            self.spans.push(TestSpan {
+                samples,
+                rate,
+                channels,
+            });
+            self
+        }
+
+        /// Returns the active span for metadata queries, falling back to the last span
+        /// once the source is exhausted so rate/channels remain defined.
+        fn current_span(&self) -> &TestSpan {
+            self.spans
+                .get(self.span)
+                .unwrap_or_else(|| self.spans.last().unwrap())
         }
     }
 
@@ -628,37 +682,65 @@ mod tests {
         type Item = Sample;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.index < self.samples.len() {
-                let sample = self.samples[self.index];
-                self.index += 1;
-                Some(sample)
-            } else {
-                None
+            if self.span >= self.spans.len() {
+                return None;
             }
+            let s = self.spans[self.span].samples[self.offset];
+            self.offset += 1;
+            if self.offset >= self.spans[self.span].samples.len() {
+                self.span += 1;
+                self.offset = 0;
+            }
+            Some(s)
         }
     }
 
     impl Source for TestSource {
         fn current_span_len(&self) -> Option<usize> {
-            Some(self.samples.len())
+            Some(self.spans.get(self.span).map_or(0, |s| s.samples.len()))
         }
 
         fn sample_rate(&self) -> SampleRate {
-            self.sample_rate
+            self.current_span().rate
         }
 
         fn channels(&self) -> ChannelCount {
-            self.channels
+            self.current_span().channels
         }
 
         fn total_duration(&self) -> Option<Duration> {
-            let samples = self.samples.len() / self.channels.get() as usize;
-            Some(Duration::from_secs_f64(
-                samples as f64 / self.sample_rate.get() as f64,
-            ))
+            let secs: f64 = self
+                .spans
+                .iter()
+                .map(|s| {
+                    let frames = s.samples.len() / s.channels.get() as usize;
+                    frames as f64 / s.rate.get() as f64
+                })
+                .sum();
+            Some(Duration::from_secs_f64(secs))
         }
 
-        fn try_seek(&mut self, _position: Duration) -> Result<(), SeekError> {
+        fn try_seek(&mut self, position: Duration) -> Result<(), SeekError> {
+            let mut remaining = position.as_secs_f64();
+            for (i, span) in self.spans.iter().enumerate() {
+                let frames = span.samples.len() / span.channels.get() as usize;
+                let span_dur = frames as f64 / span.rate.get() as f64;
+                let is_last = i + 1 == self.spans.len();
+                if remaining < span_dur || is_last {
+                    let frame_offset = (remaining * span.rate.get() as f64) as usize;
+                    let sample_offset =
+                        (frame_offset * span.channels.get() as usize).min(span.samples.len());
+                    self.span = i;
+                    self.offset = sample_offset;
+                    if self.offset >= span.samples.len() {
+                        self.span += 1;
+                        self.offset = 0;
+                    }
+                    return Ok(());
+                }
+                remaining -= span_dur;
+            }
+            // Empty spans vec — nothing to seek.
             Ok(())
         }
     }
@@ -780,5 +862,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Without the `already_read` fix, `total_input_frames` (never reset at same-format
+    /// span boundaries) was used instead of `input_samples_consumed` (reset at each
+    /// boundary). On the second span that caused the span cap to evaluate to zero
+    /// immediately, so Rubato would error on a zero-length partial chunk and
+    /// `next_sample` would return `None` early — producing roughly half the expected
+    /// output.
+    #[test]
+    fn test_span_boundary_same_format() {
+        let span_frames = 100usize;
+        let channels = ChannelCount::new(1).unwrap();
+        let rate = SampleRate::new(44100).unwrap();
+        let target = SampleRate::new(48000).unwrap();
+
+        let source = TestSource::new(vec![0.1; span_frames], rate, channels).chain(
+            vec![0.9; span_frames],
+            rate,
+            channels,
+        );
+
+        let output: Vec<Sample> =
+            Resample::new(source, target, ResampleConfig::poly().build()).collect();
+
+        let ratio = target.get() as f64 / rate.get() as f64;
+        let expected = ((2 * span_frames) as f64 * ratio).ceil() as usize;
+
+        assert_eq!(
+            output.len(),
+            expected,
+            "expected {expected} samples from both spans, got {} \
+             (second span likely not processed)",
+            output.len()
+        );
     }
 }
