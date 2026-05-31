@@ -97,6 +97,10 @@ pub struct RubatoResample<I: Source, R: rubato::Resampler<Sample>> {
 
     pub output_delay_remaining: usize,
     pub resample_ratio: Float,
+
+    /// Effective length of the current output chunk as seen by callers of `current_span_len`.
+    /// Differs from `output_buffer.len()` when delay-compensation skip consumed leading samples.
+    pub output_span_len: usize,
 }
 
 impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
@@ -113,9 +117,9 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
         !self.output_buffer.is_empty()
     }
 
-    /// Number of valid samples in the current output chunk.
-    pub fn output_len(&self) -> usize {
-        self.output_buffer.len()
+    /// Effective span length of the current output chunk for `current_span_len` reporting.
+    pub fn output_span_len(&self) -> usize {
+        self.output_span_len
     }
 
     /// Number of output samples remaining to be read.
@@ -135,6 +139,7 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
         self.real_frames_in_buffer = 0;
         self.output_delay_remaining =
             Self::calculate_delay_compensation(&self.resampler, self.channels);
+        self.output_span_len = 0;
     }
 
     fn fill_input_buffer(&mut self, needed: usize, num_channels: usize) {
@@ -303,6 +308,10 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
                     .saturating_sub(self.total_output_samples);
                 self.output_buffer.cap_to_remaining(remaining);
             }
+
+            // Snapshot remaining after skip and cap. Stays constant while the chunk drains,
+            // giving current_span_len a stable total that excludes delay-skipped leading samples.
+            self.output_span_len = self.output_buffer.remaining();
         }
     }
 }
@@ -349,6 +358,7 @@ impl<I: Source> RubatoAsyncResample<I> {
             input_samples_consumed: 0,
             input_exhausted: false,
             output_delay_remaining,
+            output_span_len: 0,
             total_input_frames: 0,
             total_output_samples: 0,
             expected_output_samples: 0,
@@ -410,6 +420,7 @@ impl<I: Source> RubatoAsyncResample<I> {
             input_samples_consumed: 0,
             input_exhausted: false,
             output_delay_remaining,
+            output_span_len: 0,
             total_input_frames: 0,
             total_output_samples: 0,
             expected_output_samples: 0,
@@ -472,6 +483,7 @@ impl<I: Source> RubatoFftResample<I> {
             expected_output_samples: 0,
             real_frames_in_buffer: 0,
             output_delay_remaining,
+            output_span_len: 0,
             resample_ratio,
         })
     }

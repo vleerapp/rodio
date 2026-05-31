@@ -342,7 +342,7 @@ where
                     resampler.input.sample_rate(),
                     resampler.input.is_exhausted(),
                     resampler.output_has_samples(),
-                    resampler.output_len(),
+                    resampler.output_span_len(),
                 ),
                 #[cfg(feature = "rubato-fft")]
                 ResampleInner::Fft(resampler) => (
@@ -350,7 +350,7 @@ where
                     resampler.input.sample_rate(),
                     resampler.input.is_exhausted(),
                     resampler.output_has_samples(),
-                    resampler.output_len(),
+                    resampler.output_span_len(),
                 ),
             };
 
@@ -849,6 +849,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_current_span_len_excludes_delay() {
+        let channels = ChannelCount::new(1).unwrap();
+        let from = SampleRate::new(44100).unwrap();
+        let to = SampleRate::new(48000).unwrap();
+
+        let input = create_test_input(2048, 1);
+        let source = from_iter(input.into_iter(), channels, from);
+        // sinc_len=16 gives a non-zero output delay without being slow in debug builds
+        let config = ResampleConfig::sinc()
+            .sinc_len(NonZero::new(16).unwrap())
+            .build();
+        let mut resampler = Resample::new(source, to, config);
+
+        let _ = resampler.next().expect("should have samples");
+        let reported = resampler
+            .current_span_len()
+            .expect("should report span len");
+
+        let mut count = 1;
+        while resampler.current_span_len() == Some(reported) {
+            assert!(
+                resampler.next().is_some(),
+                "source exhausted before first chunk drained"
+            );
+            count += 1;
+        }
+
+        assert_eq!(
+            count, reported,
+            "current_span_len() = {reported} but first chunk emitted {count} samples"
+        );
     }
 
     #[test]
