@@ -38,7 +38,10 @@ Rodio will keep a rolling MSRV (minimum supported rust version) policy of at lea
 
 ## Dependencies (Linux only)
 
-Rodio uses `cpal` library to send audio to the OS for playback. ALSA development files are needed to build `cpal` on Linux. These are provided as part of the `libasound2-dev` package on Debian and Ubuntu distributions and `alsa-lib-devel` on Fedora.
+Rodio uses `cpal` for audio playback and recording. The following development libraries are required on Linux:
+
+- **ALSA** (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora): always required as the base audio layer.
+- **PulseAudio** (`libpulse-dev` on Debian/Ubuntu, `pulseaudio-libs-devel` on Fedora): required when the `pulseaudio` feature is enabled, which it is by default.
 
 ### Minimal build
 
