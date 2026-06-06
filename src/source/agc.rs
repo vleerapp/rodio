@@ -528,8 +528,7 @@ where
         // Take maximum to ensure the peak is always an upper bound.
         // This guarantees that peak_level never decreases below the current sample,
         // preserving the safety mechanism against clipping.
-        // Set an upper bound to prevent tracking out-of-bounds samples from decoders like libopus
-        self.peak_level = sample_value.max(peak_release).min(1.0);
+        self.peak_level = sample_value.max(peak_release);
     }
 
     /// Updates the RMS (Root Mean Square) level using a circular buffer approach.
