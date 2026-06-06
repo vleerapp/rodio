@@ -319,7 +319,7 @@ where
         AutomaticGainControl {
             input,
             target_level: Arc::new(AtomicFloat::new(target_level)),
-            floor: 0.0,
+            floor: 1.0,
             absolute_max_gain: Arc::new(AtomicFloat::new(absolute_max_gain)),
             peak_tracking_window,
             current_gain: 1.0,
@@ -340,7 +340,7 @@ where
         AutomaticGainControl {
             input,
             target_level,
-            floor: 0.0,
+            floor: 1.0,
             absolute_max_gain,
             peak_tracking_window,
             current_gain: 1.0,
