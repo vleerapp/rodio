@@ -166,7 +166,7 @@ atomic_float = { version = "1.1.0", optional = true }
 rtrb = { version = "0.3.2", optional = true }
 
 # Rubato resampling
-rubato = { version = "2.0", default-features = false }
+rubato = { version = "3.0", default-features = false }
 
 symphonia-adapter-libopus = { version = "0.2", optional = true }
 
