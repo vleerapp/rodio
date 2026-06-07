@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::{
     buffer::SamplesBuffer,
     common::{assert_error_traits, ChannelCount, SampleRate},
+    conversions::SampleRateConverter,
     math, Float, Sample,
 };
 
@@ -36,7 +37,6 @@ pub use self::pausable::Pausable;
 pub use self::periodic::PeriodicAccess;
 pub use self::position::TrackPosition;
 pub use self::repeat::Repeat;
-pub use self::resample::{Resample, ResampleConfig};
 pub use self::sawtooth::SawtoothWave;
 pub use self::signal_generator::{Function, GeneratorFunction, SignalGenerator};
 pub use self::sine::SineWave;
@@ -50,6 +50,7 @@ pub use self::take::TakeDuration;
 pub use self::triangle::TriangleWave;
 pub use self::uniform::UniformSourceIterator;
 pub use self::zero::{Zero, ZeroError};
+pub use crate::conversions::ResampleConfig;
 
 mod agc;
 mod amplify;
@@ -75,7 +76,6 @@ mod pausable;
 mod periodic;
 mod position;
 mod repeat;
-pub mod resample;
 mod sawtooth;
 mod signal_generator;
 mod sine;
@@ -737,8 +737,8 @@ pub trait Source: Iterator<Item = Sample> {
 
     /// Resamples this source to a different sample rate.
     ///
-    /// See the [`resample`] module documentation for detailed information about resampling
-    /// algorithms and quality presets.
+    /// See the [`sample_rate`](crate::conversions::sample_rate) module documentation for detailed
+    /// information about resampling algorithms and quality presets.
     ///
     /// # Quality Presets
     ///
@@ -756,11 +756,11 @@ pub trait Source: Iterator<Item = Sample> {
     /// let resampled = source.resample(SampleRate::new(96000).unwrap(), ResampleConfig::balanced());
     /// ```
     #[inline]
-    fn resample(self, target_rate: SampleRate, config: ResampleConfig) -> Resample<Self>
+    fn resample(self, target_rate: SampleRate, config: ResampleConfig) -> SampleRateConverter<Self>
     where
         Self: Sized,
     {
-        Resample::new(self, target_rate, config)
+        SampleRateConverter::new(self, target_rate, config)
     }
 
     /// Attempts to seek to a given position in the current source.

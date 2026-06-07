@@ -3,8 +3,8 @@
 use dasp_sample::Sample as _;
 use rubato::{audioadapter_buffers::direct::InterleavedSlice, Resampler};
 
-use crate::source::{ChannelCount, SampleRate, Source};
-use crate::{Float, Sample};
+use crate::common::{ChannelCount, SampleRate};
+use crate::{Float, Sample, Source};
 
 use super::buffer::Buffer;
 use super::builder::{Poly, Sinc, WindowFunction};
@@ -206,8 +206,8 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
 
             // When the span cap brings needed_input to zero and the buffer is empty,
             // check whether the source is truly exhausted (single-span done) or just
-            // at a same-format span boundary. For the latter, Resample::next() will have
-            // refreshed cached_input_span_len before the next call.
+            // at a same-format span boundary. For the latter, SampleRateConverter::next()
+            // will have refreshed cached_input_span_len before the next call.
             if needed_input == 0 && !self.input_exhausted {
                 self.input_exhausted = self.input.is_exhausted();
             }

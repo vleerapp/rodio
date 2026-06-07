@@ -1,18 +1,18 @@
 use std::time::Duration;
 
-use super::resample::{Poly, Resample, ResampleConfig};
 use super::SeekError;
 use crate::common::{ChannelCount, SampleRate};
 use crate::conversions::ChannelCountConverter;
+use crate::conversions::{Poly, ResampleConfig, SampleRateConverter};
 use crate::Source;
 
 #[derive(Clone)]
 enum UniformInner<I: Source> {
     Passthrough(I),
-    SampleRate(Resample<I>),
+    SampleRate(SampleRateConverter<I>),
     ChannelCount(ChannelCountConverter<I>),
-    BothUpmix(ChannelCountConverter<Resample<I>>),
-    BothDownmix(Resample<ChannelCountConverter<I>>),
+    BothUpmix(ChannelCountConverter<SampleRateConverter<I>>),
+    BothDownmix(SampleRateConverter<ChannelCountConverter<I>>),
 }
 
 impl<I: Source> Iterator for UniformInner<I> {
@@ -164,7 +164,7 @@ where
             (false, false) => UniformInner::Passthrough(input),
             (true, false) => {
                 let config = ResampleConfig::poly().degree(Poly::Linear).build();
-                let rate_converted = Resample::new(input, target_sample_rate, config);
+                let rate_converted = SampleRateConverter::new(input, target_sample_rate, config);
                 UniformInner::SampleRate(rate_converted)
             }
             (false, true) => {
@@ -176,7 +176,8 @@ where
                 let config = ResampleConfig::poly().degree(Poly::Linear).build();
 
                 if target_channels > from_channels {
-                    let rate_converted = Resample::new(input, target_sample_rate, config);
+                    let rate_converted =
+                        SampleRateConverter::new(input, target_sample_rate, config);
                     let channel_converted =
                         ChannelCountConverter::new(rate_converted, from_channels, target_channels);
                     UniformInner::BothUpmix(channel_converted)
@@ -184,7 +185,7 @@ where
                     let channel_converted =
                         ChannelCountConverter::new(input, from_channels, target_channels);
                     let rate_converted =
-                        Resample::new(channel_converted, target_sample_rate, config);
+                        SampleRateConverter::new(channel_converted, target_sample_rate, config);
                     UniformInner::BothDownmix(rate_converted)
                 }
             }

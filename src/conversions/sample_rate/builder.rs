@@ -196,7 +196,7 @@ impl Default for SincConfigBuilder {
 ///
 /// ```rust
 /// use rodio::math::nz;
-/// use rodio::source::{resample::Poly, ResampleConfig};
+/// use rodio::conversions::{Poly, ResampleConfig};
 ///
 /// // Use presets
 /// let config = ResampleConfig::balanced();

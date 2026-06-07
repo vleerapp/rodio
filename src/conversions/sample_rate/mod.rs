@@ -13,12 +13,12 @@
 //! let resampled = source.resample(SampleRate::new(96000).unwrap(), config);
 //! ```
 //!
-//! For advanced control, use the [`ResampleConfig`] builder:
+//! For advanced control, use [`SampleRateConverter`] directly:
 //!
 //! ```rust
 //! use rodio::math::nz;
-//! use rodio::source::{SineWave, Source, Resample, ResampleConfig};
-//! use rodio::source::resample::{Sinc, WindowFunction};
+//! use rodio::source::{SineWave, Source, ResampleConfig};
+//! use rodio::conversions::{SampleRateConverter, Sinc, WindowFunction};
 //!
 //! let source = SineWave::new(440.0);
 //! let config = ResampleConfig::sinc()                  // Sinc resampling
@@ -27,7 +27,7 @@
 //!     .window(WindowFunction::BlackmanHarris2)         // Squared Blackman-Harris window
 //!     .chunk_size(nz!(512))                            // Low latency (5.3 ms @ 1-channel 96 kHz)
 //!     .build();
-//! let resampled = Resample::new(source, nz!(96000), config);
+//! let resampled = SampleRateConverter::new(source, nz!(96000), config);
 //! ```
 //!
 //! # Understanding Resampling
@@ -77,7 +77,7 @@
 
 use std::time::Duration;
 
-use super::{reset_seek_span_tracking, SeekError};
+use crate::source::{reset_seek_span_tracking, SeekError};
 use crate::{
     common::{ChannelCount, Sample, SampleRate},
     math::gcd,
@@ -101,7 +101,7 @@ const MAX_FIXED_RATIO: u32 = 1280;
 
 /// Resamples an audio source to a target sample rate using Rubato.
 #[derive(Debug)]
-pub struct Resample<I>
+pub struct SampleRateConverter<I>
 where
     I: Source,
 {
@@ -116,18 +116,18 @@ where
     pending_recreate: bool,
 }
 
-impl<I> Clone for Resample<I>
+impl<I> Clone for SampleRateConverter<I>
 where
     I: Source + Clone,
 {
     fn clone(&self) -> Self {
         // Shallow clone: this resets filter state
         let source = self.inner().clone();
-        Resample::new(source, self.target_rate, self.config.clone())
+        SampleRateConverter::new(source, self.target_rate, self.config.clone())
     }
 }
 
-impl<I> Resample<I>
+impl<I> SampleRateConverter<I>
 where
     I: Source,
 {
@@ -328,7 +328,7 @@ where
     }
 }
 
-impl<I> Source for Resample<I>
+impl<I> Source for SampleRateConverter<I>
 where
     I: Source,
 {
@@ -445,7 +445,7 @@ where
     }
 }
 
-impl<I> Iterator for Resample<I>
+impl<I> Iterator for SampleRateConverter<I>
 where
     I: Source,
 {
@@ -749,7 +749,7 @@ mod tests {
             let input = vec![];
             let config = ResampleConfig::default();
             let source = from_iter(input.clone().into_iter(), *channels, *from);
-            let output = Resample::new(source, *to, config).collect::<Vec<_>>();
+            let output = SampleRateConverter::new(source, *to, config).collect::<Vec<_>>();
             input == output
         }
 
@@ -758,7 +758,7 @@ mod tests {
             let input = convert_to_frames(input, *channels);
             let config = ResampleConfig::default();
             let source = from_iter(input.clone().into_iter(), *channels, *from);
-            let output = Resample::new(source, *from, config).collect::<Vec<_>>();
+            let output = SampleRateConverter::new(source, *from, config).collect::<Vec<_>>();
             input == output
         }
 
@@ -774,7 +774,7 @@ mod tests {
             let from = source.sample_rate();
 
             let config = ResampleConfig::poly().degree(Poly::Linear).build();
-            let resampled = Resample::new(source, *to, config);
+            let resampled = SampleRateConverter::new(source, *to, config);
             let duration = Duration::from_secs_f32(resampled.count() as f32 / to.get() as f32);
 
             let delta = duration.abs_diff(d);
@@ -830,7 +830,7 @@ mod tests {
                 let input_samples = input.len();
 
                 let source = from_iter(input.into_iter(), ch, from);
-                let resampler = Resample::new(source, to, config.clone());
+                let resampler = SampleRateConverter::new(source, to, config.clone());
 
                 let size_hint_lower = resampler.size_hint().0;
                 let output_count = resampler.count();
@@ -863,7 +863,7 @@ mod tests {
         let config = ResampleConfig::sinc()
             .sinc_len(NonZero::new(16).unwrap())
             .build();
-        let mut resampler = Resample::new(source, to, config);
+        let mut resampler = SampleRateConverter::new(source, to, config);
 
         let _ = resampler.next().expect("should have samples");
         let reported = resampler
@@ -899,7 +899,7 @@ mod tests {
         );
 
         let output: Vec<Sample> =
-            Resample::new(source, target, ResampleConfig::poly().build()).collect();
+            SampleRateConverter::new(source, target, ResampleConfig::poly().build()).collect();
 
         let ratio = target.get() as f64 / rate.get() as f64;
         let expected = ((2 * span_frames) as f64 * ratio).ceil() as usize;

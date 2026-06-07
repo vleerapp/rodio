@@ -2,7 +2,10 @@ use crate::common::ChannelCount;
 use crate::{Sample, Source};
 use dasp_sample::Sample as _;
 
-/// Iterator that converts from a certain channel count to another.
+/// Converts a source from one channel count to another.
+///
+/// When adding channels, a mono input is duplicated across the first two channels and the rest are
+/// filled with silence. When removing channels, the surplus channels are dropped.
 #[derive(Clone, Debug)]
 pub struct ChannelCountConverter<I>
 where
