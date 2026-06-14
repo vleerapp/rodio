@@ -38,10 +38,11 @@ Rodio will keep a rolling MSRV (minimum supported rust version) policy of at lea
 
 ## Dependencies (Linux only)
 
-Rodio uses `cpal` for audio playback and recording. The following development libraries are required on Linux:
+Rodio uses `cpal` for audio playback and recording. On Linux, cpal tries audio hosts in the order **PipeWire > PulseAudio > ALSA**, falling back to the next whenever a host is not compiled in (its feature is disabled) or not available at runtime. **ALSA** (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora) is always required as the base audio layer.
 
-- **ALSA** (`libasound2-dev` on Debian/Ubuntu, `alsa-lib-devel` on Fedora): always required as the base audio layer.
-- **PulseAudio** (`libpulse-dev` on Debian/Ubuntu, `pulseaudio-libs-devel` on Fedora): required when the `pulseaudio` feature is enabled, which it is by default.
+The `pulseaudio` feature, which is enabled by default, does not require any development libraries because the `pulseaudio-rs` crate is pure Rust.
+
+The optional `pipewire` feature enables more direct interfacing with PipeWire systems, but unlike `pulseaudio` it does require development libraries (`libpipewire-0.3-dev` and `libdbus-1-dev` on Debian/Ubuntu).
 
 ### Minimal build
 
