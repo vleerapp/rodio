@@ -106,9 +106,9 @@ where
 {
     #[inline]
     fn current_span_len(&self) -> Option<usize> {
-        self.input.current_span_len().map(|len| {
-            len / self.input.channels().get() as usize * self.channel_volumes.len()
-        })
+        self.input
+            .current_span_len()
+            .map(|len| len / self.input.channels().get() as usize * self.channel_volumes.len())
     }
 
     #[inline]
