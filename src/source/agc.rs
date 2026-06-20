@@ -88,6 +88,10 @@ pub struct AutomaticGainControlSettings {
     /// Larger values provide more stable peak detection but add latency to peak tracking.
     /// Smaller values respond faster to sudden peaks but may allow more transient clipping.
     pub peak_tracking_window: Duration,
+    /// The minimum output level (gain floor) that the AGC will not go below.
+    /// A value of 1.0 preserves loud passages at source level without additional amplification (amplification only).
+    /// A value of 0.0 allows unlimited amplification (pure AGC behaviour).
+    pub floor: Float,
 }
 
 impl Default for AutomaticGainControlSettings {
@@ -98,6 +102,7 @@ impl Default for AutomaticGainControlSettings {
             release_time: Duration::from_micros(500),        // Recommended release time
             absolute_max_gain: 7.0,                          // Recommended max gain
             peak_tracking_window: Duration::from_millis(10), // Recommended peak tracking window for balanced stability and responsiveness
+            floor: 1.0, // Amplify Only (preserve source level for loud passages by default)
         }
     }
 }
@@ -295,6 +300,7 @@ impl CircularBufferRMS {
 /// `release_time` - Time constant for gain decrease
 /// `absolute_max_gain` - Maximum allowable gain
 /// `peak_tracking_window` - Duration over which to track peak level
+/// `floor` - The minimum output level (gain floor) that the AGC will not go below
 #[inline]
 pub(crate) fn automatic_gain_control<I>(
     input: I,
@@ -303,6 +309,7 @@ pub(crate) fn automatic_gain_control<I>(
     release_time: Duration,
     absolute_max_gain: Float,
     peak_tracking_window: Duration,
+    floor: Float,
 ) -> AutomaticGainControl<I>
 where
     I: Source,
@@ -319,7 +326,7 @@ where
         AutomaticGainControl {
             input,
             target_level: Arc::new(AtomicFloat::new(target_level)),
-            floor: 1.0,
+            floor,
             absolute_max_gain: Arc::new(AtomicFloat::new(absolute_max_gain)),
             peak_tracking_window,
             current_gain: 1.0,
@@ -340,7 +347,7 @@ where
         AutomaticGainControl {
             input,
             target_level,
-            floor: 1.0,
+            floor,
             absolute_max_gain,
             peak_tracking_window,
             current_gain: 1.0,

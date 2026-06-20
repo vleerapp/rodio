@@ -439,6 +439,7 @@ pub trait Source: Iterator<Item = Sample> {
             release_time_limited,
             agc_settings.absolute_max_gain,
             agc_settings.peak_tracking_window,
+            agc_settings.floor,
         )
     }
 
