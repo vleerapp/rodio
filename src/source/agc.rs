@@ -20,6 +20,7 @@
 use super::{SeekError, SpanTracker};
 use crate::math::{duration_to_coefficient, duration_to_float, fast_exp};
 use crate::{ChannelCount, Float, Sample, SampleRate, Source};
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 #[cfg(feature = "tracing")]
@@ -41,15 +42,6 @@ type AtomicFloat = AtomicF32;
 #[cfg(all(feature = "experimental", feature = "64bit"))]
 type AtomicFloat = AtomicF64;
 
-/// Ensures `RMS_WINDOW_SIZE` is a power of two
-const fn power_of_two(n: usize) -> usize {
-    assert!(
-        n.is_power_of_two(),
-        "RMS_WINDOW_SIZE must be a power of two"
-    );
-    n
-}
-
 /// Divide `a` by `b` unless `b` is NaN, infinite, or <= 0,
 /// in which case `fallback` is returned.
 #[inline(always)]
@@ -61,9 +53,9 @@ fn div_or_fallback(a: Float, b: Float, fallback: Float) -> Float {
     }
 }
 
-/// Size of the circular buffer used for RMS calculation.
+/// Size of the target circular buffer used for RMS calculation, in milliseconds.
 /// A larger size provides more stable RMS values but increases latency.
-const RMS_WINDOW_SIZE: usize = power_of_two(1024);
+const RMS_WINDOW_MS: Duration = Duration::from_millis(20);
 
 /// Settings for the Automatic Gain Control (AGC).
 ///
@@ -248,22 +240,43 @@ impl SlowDownState {
 /// avoiding the need to scan stored samples for mean calculations.
 #[derive(Clone, Debug)]
 struct CircularBufferRMS {
-    buffer: Box<[Float; RMS_WINDOW_SIZE]>,
+    buffer: Box<[Float]>,
     sum_of_squares: Float,
     index: usize,
+    mask: usize,
 }
 
 impl CircularBufferRMS {
-    /// Creates a new `CircularBufferRMS` with a fixed size determined at compile time.
+    /// Calculates the buffer size from the sample rate and target window length.
     ///
-    /// The buffer size is `RMS_WINDOW_SIZE`, chosen as a power of two for
-    /// efficient modulo operations using bitwise arithmetic.
+    /// The window is expressed in milliseconds, converted to samples, then rounded
+    /// up to the next power of two for efficient index wrapping using bitwise arithmetic.
     #[inline]
-    fn new() -> Self {
+    fn calculate_rms_buffer_size(sample_rate: NonZeroU32, window_ms: Duration) -> usize {
+        // Convert the time window into the number of samples for this sample rate
+        // Example: 44,100 × 20 ms / 1,000 -> 882 samples
+        let samples = (sample_rate.get() as usize * window_ms.as_millis() as usize).div_ceil(1000);
+
+        // Ensure minimum 1 sample, then round up to nearest power of two
+        // Result: 882 samples -> 1024-sample buffer
+        // Which is: 1024 samples at 44,100 Hz ≈ 23.2 ms
+        samples.max(1).next_power_of_two()
+    }
+
+    /// Creates a new `CircularBufferRMS` from a sample rate and target window size in milliseconds.
+    ///
+    /// The buffer size is computed from the requested duration and rounded up to a power of two
+    /// so wrapping can use bitwise arithmetic instead of modulo.
+    #[inline]
+    fn new(sample_rate: NonZeroU32, window_ms: Duration) -> Self {
+        // Calculate the buffer size from the sample_rate and target window
+        let size = Self::calculate_rms_buffer_size(sample_rate, window_ms);
+
         CircularBufferRMS {
-            buffer: Box::new([0.0; RMS_WINDOW_SIZE]),
+            buffer: vec![0.0; size].into_boxed_slice(), // [T; N] requires const N; Vec allows runtime size
             sum_of_squares: 0.0,
             index: 0,
+            mask: size - 1,
         }
     }
 
@@ -277,8 +290,8 @@ impl CircularBufferRMS {
         // Update the sum of squares by subtracting the square of the old value and adding the square of the new value.
         self.sum_of_squares = (self.sum_of_squares - (old_value * old_value)) + (value * value);
         self.buffer[self.index] = value;
-        // Use bitwise for efficient index wrapping since RMS_WINDOW_SIZE is a power of two.
-        self.index = (self.index + 1) & (RMS_WINDOW_SIZE - 1);
+        // Use bitwise for efficient index wrapping since the buffer size is a power of two.
+        self.index = (self.index + 1) & self.mask;
     }
 
     /// Calculate the RMS (Root Mean Square) value of all values in the buffer.
@@ -286,7 +299,7 @@ impl CircularBufferRMS {
     /// RMS provides a measure of the signal's effective or average magnitude.
     #[inline]
     fn rms(&self) -> Float {
-        (self.sum_of_squares / RMS_WINDOW_SIZE as Float).sqrt()
+        (self.sum_of_squares / self.buffer.len() as Float).sqrt()
     }
 }
 
@@ -334,7 +347,7 @@ where
             release_duration: Arc::new(AtomicFloat::new(release_duration)),
             peak_level: 0.7,
             release_coefficient,
-            rms_window: CircularBufferRMS::new(),
+            rms_window: CircularBufferRMS::new(sample_rate, RMS_WINDOW_MS),
             is_enabled: Arc::new(AtomicBool::new(true)),
             span: SpanTracker::new(sample_rate, channels),
             slow_down_state: SlowDownState::new(sample_rate),
@@ -355,7 +368,7 @@ where
             release_duration,
             peak_level: 0.7,
             release_coefficient,
-            rms_window: CircularBufferRMS::new(),
+            rms_window: CircularBufferRMS::new(sample_rate, RMS_WINDOW_MS),
             is_enabled: true,
             span: SpanTracker::new(sample_rate, channels),
             slow_down_state: SlowDownState::new(sample_rate),
@@ -675,7 +688,7 @@ where
                 duration_to_coefficient(self.peak_tracking_window, current_sample_rate);
 
             // Reset RMS window to avoid mixing samples from different parameter sets
-            self.rms_window = CircularBufferRMS::new();
+            self.rms_window = CircularBufferRMS::new(current_sample_rate, RMS_WINDOW_MS);
             self.peak_level = 0.7;
             self.current_gain = 1.0;
         }
