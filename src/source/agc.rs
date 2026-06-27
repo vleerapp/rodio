@@ -11,6 +11,7 @@
 //   • Atomic operations support (experimental)
 //   • Fast release coefficient via 3rd‑order Taylor approximation (evaluated with Horner's method)
 //   • Power-of-two window sizing for efficiency
+//   • Presets for music and speech
 //
 //   Optimised for smooth and responsive gain control
 //
@@ -86,16 +87,40 @@ pub struct AutomaticGainControlSettings {
     pub floor: Float,
 }
 
-impl Default for AutomaticGainControlSettings {
-    fn default() -> Self {
+impl AutomaticGainControlSettings {
+    /// Returns a preset optimised for music content.
+    ///
+    /// Values tuned through empirical testing and are intended as good defaults for general music processing.
+    pub fn music_preset() -> Self {
         AutomaticGainControlSettings {
-            target_level: 1.0,                               // Default to original level
-            attack_time: Duration::from_millis(500),         // Recommended attack time
-            release_time: Duration::from_micros(500),        // Recommended release time
-            absolute_max_gain: 7.0,                          // Recommended max gain
-            peak_tracking_window: Duration::from_millis(10), // Recommended peak tracking window for balanced stability and responsiveness
-            floor: 1.0, // Amplify Only (preserve source level for loud passages by default)
+            target_level: 1.0,
+            attack_time: Duration::from_millis(500),
+            release_time: Duration::from_micros(500),
+            absolute_max_gain: 7.0,
+            peak_tracking_window: Duration::from_millis(10),
+            floor: 1.0,
         }
+    }
+
+    /// Returns a preset optimised for speech content.
+    ///
+    /// Values tuned through empirical testing and are intended as good defaults for general speech processing.
+    pub fn speech_preset() -> Self {
+        AutomaticGainControlSettings {
+            target_level: 1.0,
+            attack_time: Duration::from_millis(250),
+            release_time: Duration::from_micros(50),
+            absolute_max_gain: 7.0,
+            peak_tracking_window: Duration::from_millis(10),
+            floor: 0.0,
+        }
+    }
+}
+
+impl Default for AutomaticGainControlSettings {
+    // Music preset is the default
+    fn default() -> Self {
+        Self::music_preset()
     }
 }
 
