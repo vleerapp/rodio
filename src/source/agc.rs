@@ -240,10 +240,11 @@ impl SlowDownState {
 /// avoiding the need to scan stored samples for mean calculations.
 #[derive(Clone, Debug)]
 struct CircularBufferRMS {
-    buffer: Box<[Float]>,
-    sum_of_squares: Float,
-    index: usize,
-    mask: usize,
+    buffer: Box<[Float]>, // Runtime-sized window so RMS spans the same time range at any sample rate
+    sum_of_squares: Float, // Keeps a running square-sum so RMS can be updated without re-scanning the entire buffer
+    index: usize, // Marks the current slot; each new sample overwrites the oldest one as we advance
+    mask: usize, // Lets the index wrap with `&` instead of `%`, which is faster because the size is a power of two
+    reciprocal_len: Float, // Stores `1 / len` so RMS normalizes with multiplication instead of division
 }
 
 impl CircularBufferRMS {
@@ -277,6 +278,7 @@ impl CircularBufferRMS {
             sum_of_squares: 0.0,
             index: 0,
             mask: size - 1,
+            reciprocal_len: 1.0 / size as Float,
         }
     }
 
@@ -299,7 +301,7 @@ impl CircularBufferRMS {
     /// RMS provides a measure of the signal's effective or average magnitude.
     #[inline]
     fn rms(&self) -> Float {
-        (self.sum_of_squares / self.buffer.len() as Float).sqrt()
+        (self.sum_of_squares * self.reciprocal_len).sqrt()
     }
 }
 
