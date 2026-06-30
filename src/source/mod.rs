@@ -11,8 +11,8 @@ use crate::{
 
 use dasp_sample::FromSample;
 
-pub use self::agc::{AutomaticGainControl, AutomaticGainControlSettings};
 pub use self::amplify::Amplify;
+pub use self::automatic_gain_control::{AutomaticGainControl, AutomaticGainControlSettings};
 pub use self::blt::BltFilter;
 pub use self::buffered::Buffered;
 pub use self::channel_volume::ChannelVolume;
@@ -48,8 +48,8 @@ pub use self::triangle::TriangleWave;
 pub use self::uniform::UniformSourceIterator;
 pub use self::zero::{Zero, ZeroError};
 
-mod agc;
 mod amplify;
+mod automatic_gain_control;
 mod blt;
 mod buffered;
 mod channel_volume;
@@ -364,7 +364,7 @@ pub trait Source: Iterator<Item = Sample> {
         let attack_time_limited = agc_settings.attack_time.min(Duration::from_secs(10));
         let release_time_limited = agc_settings.release_time.min(Duration::from_secs(10));
 
-        agc::automatic_gain_control(
+        AutomaticGainControl::new(
             self,
             agc_settings.target_level,
             attack_time_limited,
