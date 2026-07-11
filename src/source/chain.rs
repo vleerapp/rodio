@@ -53,11 +53,8 @@ where
                 }
             }
 
-            if let Some(src) = self.iterator.next() {
-                self.current_source = Some(src);
-            } else {
-                return None;
-            }
+            let source = self.iterator.next()?;
+            self.current_source = Some(source);
         }
     }
 
