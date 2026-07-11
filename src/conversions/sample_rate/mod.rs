@@ -139,11 +139,13 @@ where
 
         #[cfg(debug_assertions)]
         if matches!(inner, ResampleInner::Sinc(_)) {
-            eprintln!(
-                "Warning: async sinc resampling is active. This is CPU-intensive and may \
+            let msg = "Warning: async sinc resampling is active. This is CPU-intensive and may \
                  produce choppy audio in a debug build. Either use an integer-multiple ratio \
-                 or compile with --release."
-            );
+                 or compile with --release.";
+            #[cfg(feature = "tracing")]
+            tracing::warn!(msg);
+            #[cfg(not(feature = "tracing"))]
+            eprintln!("{}", msg);
         }
 
         let cached_input_span_len = match &inner {
