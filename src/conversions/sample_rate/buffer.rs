@@ -10,7 +10,7 @@ use crate::Sample;
 use dasp_sample::Sample as _;
 
 /// Fixed-capacity sample buffer with a read cursor.
-pub struct Buffer {
+pub(crate) struct Buffer {
     data: Box<[Sample]>,
     pos: usize,
     len: usize,
@@ -28,7 +28,7 @@ impl fmt::Debug for Buffer {
 
 impl Buffer {
     /// Create a new buffer with the given capacity, initialized to equilibrium samples.
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             data: vec![Sample::EQUILIBRIUM; capacity].into_boxed_slice(),
             pos: 0,
@@ -37,30 +37,30 @@ impl Buffer {
     }
 
     /// Reset for a new fill: rewind cursor to 0 and record the number of valid samples.
-    pub fn reset(&mut self, filled: usize) {
+    pub(crate) fn reset(&mut self, filled: usize) {
         self.pos = 0;
         self.len = filled;
     }
 
     /// Advance the cursor by `n` samples (capped at `len`).
-    pub fn skip(&mut self, n: usize) {
+    pub(crate) fn skip(&mut self, n: usize) {
         self.pos = (self.pos + n).min(self.len);
     }
 
     /// Shrink `len` so at most `remaining` more samples will be returned from the cursor.
-    pub fn cap_to_remaining(&mut self, remaining: usize) {
+    pub(crate) fn cap_to_remaining(&mut self, remaining: usize) {
         self.len = self.len.min(self.pos + remaining);
     }
 
     /// True when the cursor has reached the end of the valid data.
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.pos >= self.len
     }
 
     /// Read the next sample and advance the cursor. Panics in debug if the buffer is empty.
     #[inline]
-    pub fn read(&mut self) -> Sample {
+    pub(crate) fn read(&mut self) -> Sample {
         debug_assert!(!self.is_empty(), "read from empty Buffer");
         let s = self.data[self.pos];
         self.pos += 1;
@@ -68,23 +68,23 @@ impl Buffer {
     }
 
     /// Total capacity of the backing allocation.
-    pub fn capacity(&self) -> usize {
+    pub(crate) fn capacity(&self) -> usize {
         self.data.len()
     }
 
     /// Number of valid samples set by the last `reset` call.
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.len
     }
 
     /// Number of samples remaining before the cursor reaches the end.
     #[inline]
-    pub fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> usize {
         self.len - self.pos
     }
 
     /// Full backing slice for writing via an audio adapter.
-    pub fn as_mut_slice(&mut self) -> &mut [Sample] {
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [Sample] {
         &mut self.data
     }
 }

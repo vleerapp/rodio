@@ -475,7 +475,6 @@ impl SincConfigBuilder {
             f_cutoff: self.f_cutoff,
             chunk_size: self.chunk_size,
             #[cfg(feature = "rubato-fft")]
-            #[cfg_attr(docsrs, doc(cfg(feature = "rubato-fft")))]
             sub_chunks: self.sub_chunks,
         }
     }
