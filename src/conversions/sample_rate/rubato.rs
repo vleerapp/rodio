@@ -3,11 +3,11 @@
 use dasp_sample::Sample as _;
 use rubato::{audioadapter_buffers::direct::InterleavedSlice, Resampler};
 
-use crate::common::{ChannelCount, SampleRate};
+use crate::common::{ChannelCount, InFrameCount, InSamples, OutFrameCount, OutSamples, SampleRate};
 use crate::{Float, Sample, Source};
 
-use super::buffer::Buffer;
-use super::builder::{Poly, Interpolation, WindowFunction};
+use super::buffer::OutputBuffer;
+use super::builder::{Interpolation, Poly, WindowFunction};
 
 #[derive(thiserror::Error, Debug)]
 #[error("Failed to create resampler")]
@@ -27,7 +27,7 @@ pub enum ResampleInner<I: Source> {
     /// Passthrough when source rate is equal to the target rate
     Passthrough {
         source: I,
-        input_span_pos: usize,
+        input_span_pos: InSamples,
         channels: ChannelCount,
         source_rate: SampleRate,
     },
@@ -77,39 +77,39 @@ pub struct RubatoResample<I: Source, R: rubato::Resampler<Sample>> {
     pub resampler: R,
 
     pub input_buffer: Box<[Sample]>,
-    pub input_frame_count: usize,
+    pub input_frame_count: InFrameCount,
 
-    output_buffer: Buffer,
+    output_buffer: OutputBuffer,
 
     /// The following are cached at construction for parameter-change detection.
     pub channels: ChannelCount,
     pub source_rate: SampleRate,
 
-    pub input_samples_consumed: usize,
+    pub input_samples_consumed: InSamples,
     pub input_exhausted: bool,
 
-    pub total_input_frames: usize,
-    pub total_output_samples: usize,
-    pub expected_output_samples: usize,
+    pub total_input_frames: InFrameCount,
+    pub total_output_samples: OutSamples,
+    pub expected_output_samples: OutSamples,
 
     /// The number of real (non-flush) frames currently in the input buffer.
-    pub real_frames_in_buffer: usize,
+    pub real_frames_in_buffer: InFrameCount,
 
-    pub output_delay_remaining: usize,
+    pub output_delay_remaining: OutSamples,
     pub resample_ratio: Float,
 
     /// Effective length of the current output chunk as seen by callers of `current_span_len`.
     /// Differs from `output_buffer.len()` when delay-compensation skip consumed leading samples.
-    pub output_span_len: usize,
+    pub output_span_len: OutSamples,
 }
 
 impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
     /// Calculate the number of output samples to skip for delay compensation.
-    pub fn calculate_delay_compensation(resampler: &R, channels: ChannelCount) -> usize {
+    pub fn calculate_delay_compensation(resampler: &R, channels: ChannelCount) -> OutSamples {
         // Skip delay-1 frames to align the first output frame with input position 0.
         let delay_frames = resampler.output_delay();
-        let delay_to_skip = delay_frames.saturating_sub(1);
-        delay_to_skip * channels.get() as usize
+        let delay_frames = delay_frames.saturating_sub(1);
+        OutFrameCount(delay_frames).samples(channels)
     }
 
     /// Whether the output buffer has unconsumed samples.
@@ -118,201 +118,189 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
     }
 
     /// Effective span length of the current output chunk for `current_span_len` reporting.
-    pub fn output_span_len(&self) -> usize {
+    pub fn output_span_len(&self) -> OutSamples {
         self.output_span_len
     }
 
     /// Number of output samples remaining to be read.
-    pub fn output_remaining(&self) -> usize {
+    pub fn output_remaining(&self) -> OutSamples {
         self.output_buffer.remaining()
     }
 
     pub fn reset(&mut self) {
         self.resampler.reset();
-        self.output_buffer.reset(0);
-        self.input_frame_count = 0;
-        self.input_samples_consumed = 0;
+        self.output_buffer.rewind_to(OutSamples::ZERO);
+        self.input_frame_count = InFrameCount::ZERO;
+        self.input_samples_consumed = InSamples::ZERO;
         self.input_exhausted = false;
-        self.total_input_frames = 0;
-        self.total_output_samples = 0;
-        self.expected_output_samples = 0;
-        self.real_frames_in_buffer = 0;
+        self.total_input_frames = InFrameCount::ZERO;
+        self.total_output_samples = OutSamples::ZERO;
+        self.expected_output_samples = OutSamples::ZERO;
+        self.real_frames_in_buffer = InFrameCount::ZERO;
         self.output_delay_remaining =
             Self::calculate_delay_compensation(&self.resampler, self.channels);
-        self.output_span_len = 0;
+        self.output_span_len = OutSamples::ZERO;
     }
 
-    fn fill_input_buffer(&mut self, needed: usize, num_channels: usize) {
-        while self.input_frame_count < needed {
-            if self.input_exhausted {
-                break;
-            }
-            let sample_pos = self.input_frame_count * num_channels;
-            for ch in 0..num_channels {
+    fn extend_buffer_from_source(&mut self, needed: InFrameCount, num_channels: ChannelCount) {
+        'outer: while self.input_frame_count.count() < needed.count() {
+            let frame = self.input_frame_count.samples(num_channels);
+            let next = (self.input_frame_count + 1).samples(num_channels);
+            for i in frame.raw()..next.raw() {
                 if let Some(sample) = self.input.next() {
-                    self.input_buffer[sample_pos + ch] = sample;
+                    self.input_buffer[i] = sample;
                 } else {
                     self.input_exhausted = true;
-                    break;
+                    break 'outer;
                 }
             }
-            if !self.input_exhausted {
-                self.input_frame_count += 1;
-                self.real_frames_in_buffer += 1;
-            }
+
+            self.input_frame_count += 1;
+            self.real_frames_in_buffer += 1;
         }
 
         // Zero-pad if we ran out of input to flush the filter tail
-        if self.input_frame_count == 0 {
-            self.input_buffer[..needed * num_channels].fill(Sample::EQUILIBRIUM);
+        if self.input_frame_count == InFrameCount::ZERO {
+            self.input_buffer[..needed.samples(num_channels).raw()].fill(Sample::EQUILIBRIUM);
             self.input_frame_count = needed;
             // real_frames_in_buffer stays at 0 - these are flush frames
         }
     }
 
-    pub fn next_sample(&mut self, cached_input_span_len: Option<usize>) -> Option<Sample> {
-        let num_channels = self.channels.get() as usize;
+    pub fn next_sample(&mut self, cached_input_span_len: Option<InSamples>) -> Option<Sample> {
         loop {
-            // If we have buffered output, return it
             if !self.output_buffer.is_empty() {
                 let sample = self.output_buffer.read();
                 self.total_output_samples += 1;
                 return Some(sample);
             }
 
-            // Need more input - first check if we're completely done
-            if self.input_exhausted
-                && self.input_frame_count == 0
-                && self.total_output_samples >= self.expected_output_samples
-            {
-                return None;
-            }
-
-            // Fill input buffer, flushing with zeros if input is exhausted.
-            // Cap to the span boundary so we never read into the next span's samples,
-            // which may have a different channel count or sample rate.
-            let original_needed = self.resampler.input_frames_next();
-            let needed_input = if let Some(span_len) = cached_input_span_len {
-                let span_frames = span_len / num_channels;
-                // input_samples_consumed resets to 0 at each span boundary, so this
-                // stays span-relative even when the resampler processes multiple spans.
-                let already_read =
-                    self.input_samples_consumed / num_channels + self.real_frames_in_buffer;
-                let remaining = span_frames.saturating_sub(already_read);
-                original_needed.min(self.input_frame_count + remaining)
-            } else {
-                original_needed
-            };
-
-            // When the span cap brings needed_input to zero and the buffer is empty,
-            // check whether the source is truly exhausted (single-span done) or just
-            // at a same-format span boundary. For the latter, SampleRateConverter::next()
-            // will have refreshed cached_input_span_len before the next call.
-            if needed_input == 0 && !self.input_exhausted {
-                self.input_exhausted = self.input.is_exhausted();
-            }
-
-            // When exhausted, use a full chunk so zero-padding flushes the filter tail.
-            let fill_target = if self.input_exhausted {
-                original_needed
-            } else {
-                needed_input
-            };
-            self.fill_input_buffer(fill_target, num_channels);
-
-            let actual_frames = self.input_frame_count;
-
-            // Use original_needed (pre-cap) so that partial_len is signalled to Rubato
-            // whenever we have fewer frames than a full chunk, regardless of whether the
-            // shortfall is due to source exhaustion or a span boundary cap.
-            let indexing;
-            let indexing_ref = if actual_frames < original_needed {
-                indexing = rubato::Indexing {
-                    input_offset: 0,
-                    output_offset: 0,
-                    partial_len: Some(actual_frames),
-                    active_channels_mask: None,
-                };
-                Some(&indexing)
-            } else {
-                None
-            };
-
-            let (frames_in, frames_out) = {
-                let input_adapter =
-                    InterleavedSlice::new(&self.input_buffer, num_channels, actual_frames)
-                        .inspect_err(|_e| {
-                            #[cfg(feature = "tracing")]
-                            tracing::error!("resampler: failed to create input adapter: {_e}");
-                        })
-                        .ok()?;
-
-                let num_frames = self.output_buffer.capacity() / num_channels;
-                let mut output_adapter = InterleavedSlice::new_mut(
-                    self.output_buffer.as_mut_slice(),
-                    num_channels,
-                    num_frames,
-                )
-                .inspect_err(|_e| {
-                    #[cfg(feature = "tracing")]
-                    tracing::error!("resampler: failed to create output adapter: {_e}");
-                })
-                .ok()?;
-
-                self.resampler
-                    .process_into_buffer(&input_adapter, &mut output_adapter, indexing_ref)
-                    .inspect_err(|_e| {
-                        #[cfg(feature = "tracing")]
-                        tracing::error!("resampler: processing failed: {_e}");
-                    })
-                    .ok()?
-            };
-
-            // If no output was produced and input is exhausted, we're done
-            if frames_out == 0 && self.input_exhausted {
-                return None;
-            }
-
-            // When using partial_len, Rubato may report consuming more frames than we
-            // actually provided (it counts the zero-padded frames). Clamp to actual.
-            let actual_consumed = frames_in.min(actual_frames);
-            self.input_samples_consumed += actual_consumed * num_channels;
-
-            // Only count real (non-flush) frames toward expected output
-            let real_consumed = actual_consumed.min(self.real_frames_in_buffer);
-            self.real_frames_in_buffer -= real_consumed;
-            self.total_input_frames += real_consumed;
-            self.expected_output_samples = (self.total_input_frames as Float * self.resample_ratio)
-                .ceil() as usize
-                * num_channels;
-
-            self.input_frame_count -= actual_consumed;
-
-            self.output_buffer.reset(frames_out * num_channels);
-
-            // Skip warmup delay samples
-            if self.output_delay_remaining > 0 {
-                let samples_to_skip = self.output_delay_remaining.min(self.output_buffer.len());
-                self.output_buffer.skip(samples_to_skip);
-                self.output_delay_remaining -= samples_to_skip;
-            }
-
-            // Cap output whenever a partial chunk was processed (span boundary or
-            // exhaustion) or once all input is gone. Rubato internally zero-pads a
-            // partial chunk to a full output chunk, so without the cap the output
-            // would exceed expected_output_samples.
-            if (self.input_exhausted || indexing_ref.is_some()) && self.expected_output_samples > 0
-            {
-                let remaining = self
-                    .expected_output_samples
-                    .saturating_sub(self.total_output_samples);
-                self.output_buffer.cap_to_remaining(remaining);
-            }
-
-            // Snapshot remaining after skip and cap. Stays constant while the chunk drains,
-            // giving current_span_len a stable total that excludes delay-skipped leading samples.
-            self.output_span_len = self.output_buffer.remaining();
+            std::hint::cold_path();
+            self.resample_chunk(cached_input_span_len, self.channels)?;
         }
+    }
+
+    // Extracted such that rustc has an easier time outlining this.
+    //
+    // This is complicated since we need to handle changing sample rates (spans)
+    #[inline(never)]
+    fn resample_chunk(
+        &mut self,
+        cached_input_span_len: Option<InSamples>,
+        num_channels: ChannelCount,
+    ) -> Option<()> {
+        if self.input_exhausted
+            && self.input_frame_count == InFrameCount::ZERO
+            && self.total_output_samples >= self.expected_output_samples
+        {
+            return None;
+        }
+        let original_needed = self.fill_input_buffer(cached_input_span_len, num_channels);
+
+        let indexing = if self.input_frame_count < original_needed {
+            Some(&rubato::Indexing {
+                input_offset: 0,
+                output_offset: 0,
+                partial_len: Some(self.input_frame_count.raw()),
+                active_channels_mask: None,
+            })
+        } else {
+            None
+        };
+
+        let input_adapter = InterleavedSlice::new(
+            &self.input_buffer,
+            num_channels.get().into(),
+            self.input_frame_count.raw(),
+        )
+        .expect("We always set up the input_buffer correctly");
+
+        let num_frames = self.output_buffer.capacity().frames(num_channels);
+        let mut output_adapter = InterleavedSlice::new_mut(
+            self.output_buffer.as_mut_slice(),
+            num_channels.get().into(),
+            num_frames.raw(),
+        )
+        .expect("We always set up the input_buffer correctly");
+
+        let (frames_in, frames_out) = self
+            .resampler
+            .process_into_buffer(&input_adapter, &mut output_adapter, indexing)
+            .map(|(r#in, out)| (InFrameCount(r#in), OutFrameCount(out)))
+            .expect("We always set up the input_buffer correctly");
+
+        if frames_out == OutFrameCount::ZERO && self.input_exhausted {
+            return None;
+        }
+
+        self.update_output_buffer_cursor(num_channels, indexing, frames_in, frames_out);
+        Some(())
+    }
+
+    fn update_output_buffer_cursor(
+        &mut self,
+        num_channels: std::num::NonZero<u16>,
+        indexing: Option<&rubato::Indexing>,
+        frames_in: InFrameCount,
+        frames_out: OutFrameCount,
+    ) {
+        let frames_without_padding = frames_in.min(self.input_frame_count);
+        self.input_samples_consumed += frames_without_padding.samples(num_channels);
+        let real_consumed = frames_without_padding.min(self.real_frames_in_buffer);
+        self.real_frames_in_buffer -= real_consumed;
+        self.total_input_frames += real_consumed;
+        self.input_frame_count -= frames_without_padding;
+        self.output_buffer
+            .rewind_to(frames_out.samples(num_channels));
+
+        if self.output_delay_remaining > OutSamples::ZERO {
+            let skipped = self.output_buffer.skip(self.output_delay_remaining);
+            self.output_delay_remaining -= skipped;
+        }
+
+        if (self.input_exhausted || indexing.is_some())
+            && self.expected_output_samples(num_channels) > OutSamples::ZERO
+        {
+            let remaining = self
+                .expected_output_samples(num_channels)
+                .saturating_sub(self.total_output_samples);
+            self.output_buffer.cap_to_remaining(remaining);
+        }
+        self.output_span_len = self.output_buffer.remaining();
+    }
+
+    fn expected_output_samples(&self, num_channels: ChannelCount) -> OutSamples {
+        let frames = self.total_input_frames.raw() as Float * self.resample_ratio;
+        OutFrameCount(frames.ceil() as usize).samples(num_channels)
+    }
+
+    fn fill_input_buffer(
+        &mut self,
+        cached_input_span_len: Option<InSamples>,
+        num_channels: ChannelCount,
+    ) -> InFrameCount {
+        let original_needed = InFrameCount(self.resampler.input_frames_next());
+        let needed_input = if let Some(span_len) = cached_input_span_len {
+            // input_samples_consumed resets to 0 at each span boundary, so this
+            // stays span-relative even when the resampler processes multiple spans.
+            let already_read =
+                self.input_samples_consumed.frames(num_channels) + self.real_frames_in_buffer;
+            let remaining = span_len.frames(num_channels).saturating_sub(already_read);
+            original_needed.min(self.input_frame_count + remaining)
+        } else {
+            original_needed
+        };
+
+        if needed_input == InFrameCount::ZERO && !self.input_exhausted {
+            self.input_exhausted = self.input.is_exhausted();
+        }
+        if self.input_exhausted {
+            // When exhausted, use a full chunk so zero-padding flushes the filter tail.
+            self.extend_buffer_from_source(original_needed, num_channels);
+        } else {
+            self.extend_buffer_from_source(needed_input, num_channels);
+        };
+        original_needed
     }
 }
 
@@ -338,33 +326,24 @@ impl<I: Source> RubatoAsyncResample<I> {
             rubato::FixedAsync::Output,
         )?;
 
-        let input_buf_size = resampler.input_frames_max();
-        let output_buf_size = resampler.output_frames_max();
+        let input_buf_size = InFrameCount(resampler.input_frames_max());
+        let output_buf_size = OutFrameCount(resampler.output_frames_max());
 
-        let output_delay_remaining =
+        let initial_output_delay =
             RubatoResample::<I, rubato::Async<Sample>>::calculate_delay_compensation(
                 &resampler, channels,
             );
 
-        Ok(Self {
+        Ok(Self::new_from(
             input,
             resampler,
-            input_buffer: vec![Sample::EQUILIBRIUM; input_buf_size * channels.get() as usize]
-                .into_boxed_slice(),
-            input_frame_count: 0,
-            output_buffer: Buffer::new(output_buf_size * channels.get() as usize),
+            input_buf_size,
+            output_buf_size,
             channels,
             source_rate,
-            input_samples_consumed: 0,
-            input_exhausted: false,
-            output_delay_remaining,
-            output_span_len: 0,
-            total_input_frames: 0,
-            total_output_samples: 0,
-            expected_output_samples: 0,
-            real_frames_in_buffer: 0,
+            initial_output_delay,
             resample_ratio,
-        })
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -400,33 +379,55 @@ impl<I: Source> RubatoAsyncResample<I> {
             rubato::FixedAsync::Output,
         )?;
 
-        let input_buf_size = resampler.input_frames_max();
-        let output_buf_size = resampler.output_frames_max();
+        let input_buf_size = InFrameCount(resampler.input_frames_max());
+        let output_buf_size = OutFrameCount(resampler.output_frames_max());
 
-        let output_delay_remaining =
+        let initial_output_delay =
             RubatoResample::<I, rubato::Async<Sample>>::calculate_delay_compensation(
                 &resampler, channels,
             );
 
-        Ok(Self {
+        Ok(Self::new_from(
             input,
             resampler,
-            input_buffer: vec![Sample::EQUILIBRIUM; input_buf_size * channels.get() as usize]
-                .into_boxed_slice(),
-            input_frame_count: 0,
-            output_buffer: Buffer::new(output_buf_size * channels.get() as usize),
+            input_buf_size,
+            output_buf_size,
             channels,
             source_rate,
-            input_samples_consumed: 0,
-            input_exhausted: false,
-            output_delay_remaining,
-            output_span_len: 0,
-            total_input_frames: 0,
-            total_output_samples: 0,
-            expected_output_samples: 0,
-            real_frames_in_buffer: 0,
+            initial_output_delay,
             resample_ratio,
-        })
+        ))
+    }
+
+    fn new_from(
+        input: I,
+        resampler: rubato::Async<Sample>,
+        input_buf_size: InFrameCount,
+        output_buf_size: OutFrameCount,
+        channels: ChannelCount,
+        source_rate: SampleRate,
+        initial_output_delay: OutSamples,
+        resample_ratio: Float,
+    ) -> Self {
+        Self {
+            input,
+            resampler,
+            input_buffer: vec![Sample::EQUILIBRIUM; input_buf_size.samples(channels).raw()]
+                .into_boxed_slice(),
+            input_frame_count: InFrameCount::ZERO,
+            output_buffer: OutputBuffer::new(output_buf_size.samples(channels)),
+            channels,
+            source_rate,
+            input_samples_consumed: InSamples::ZERO,
+            input_exhausted: false,
+            output_delay_remaining: initial_output_delay,
+            output_span_len: OutSamples::ZERO,
+            total_input_frames: InFrameCount::ZERO,
+            total_output_samples: OutSamples::ZERO,
+            expected_output_samples: OutSamples::ZERO,
+            real_frames_in_buffer: InFrameCount::ZERO,
+            resample_ratio,
+        }
     }
 }
 
@@ -473,7 +474,7 @@ impl<I: Source> RubatoFftResample<I> {
             input_buffer: vec![Sample::EQUILIBRIUM; input_buf_size * channels.get() as usize]
                 .into_boxed_slice(),
             input_frame_count: 0,
-            output_buffer: Buffer::new(output_buf_size * channels.get() as usize),
+            output_buffer: OutputBuffer::new(output_buf_size * channels.get() as usize),
             channels,
             source_rate,
             input_samples_consumed: 0,

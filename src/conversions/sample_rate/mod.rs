@@ -77,6 +77,7 @@
 
 use std::time::Duration;
 
+use crate::common::InSamples;
 use crate::source::{reset_seek_span_tracking, SeekError};
 use crate::{
     common::{ChannelCount, Sample, SampleRate},
@@ -177,7 +178,7 @@ where
             let channels = source.channels();
             ResampleInner::Passthrough {
                 source,
-                input_span_pos: 0,
+                input_span_pos: InSamples::ZERO,
                 channels,
                 source_rate,
             }
@@ -258,13 +259,13 @@ where
     /// - Detection (`cached_span_len` is `None`): boundary when parameters change (post-seek)
     fn detect_boundary(
         cached_span_len: Option<usize>,
-        samples_consumed: usize,
+        samples_consumed: InSamples,
         current_channels: ChannelCount,
         expected_channels: ChannelCount,
         current_rate: SampleRate,
         expected_rate: SampleRate,
     ) -> (bool, bool) {
-        let known_boundary = cached_span_len.map(|len| samples_consumed >= len);
+        let known_boundary = cached_span_len.map(|len| samples_consumed.raw() >= len);
         // In counting mode: only check parameters at boundary
         // In detection mode: check parameters at every sample until a boundary is detected
         let parameters_changed = if known_boundary.is_none_or(|at| at) {
@@ -316,7 +317,7 @@ where
             // arbitrarily, because the resampler may produce either based on its internal state
             if output_has_samples {
                 // Running state: we are iterating over our buffer with resampled samples
-                Some(output_len)
+                Some(output_len.raw())
             } else if input_exhausted {
                 // End state: we are at the end of our buffer and the source is exhausted
                 Some(0)
@@ -367,7 +368,7 @@ where
                 ..
             } => {
                 reset_seek_span_tracking(
-                    input_samples_consumed,
+                    input_samples_consumed.raw_mut(),
                     &mut self.cached_input_span_len,
                     position,
                     input_span_len,
@@ -375,7 +376,7 @@ where
             }
             ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
                 reset_seek_span_tracking(
-                    &mut r.input_samples_consumed,
+                    r.input_samples_consumed.raw_mut(),
                     &mut self.cached_input_span_len,
                     position,
                     input_span_len,
@@ -428,8 +429,8 @@ where
         let cached = self.cached_input_span_len;
         let sample = match self.resampler_mut() {
             ResampleInner::Passthrough { source, .. } => source.next()?,
-            ResampleInner::Poly(resampler) => resampler.next_sample(cached)?,
-            ResampleInner::Sinc(resampler) => resampler.next_sample(cached)?,
+            ResampleInner::Poly(resampler) => resampler.next_sample(cached.map(InSamples))?,
+            ResampleInner::Sinc(resampler) => resampler.next_sample(cached.map(InSamples))?,
             #[cfg(feature = "rubato-fft")]
             ResampleInner::Fft(resampler) => resampler.next_sample(cached)?,
         };
@@ -482,14 +483,14 @@ where
                         input_span_pos: input_samples_consumed,
                         ..
                     } => {
-                        *input_samples_consumed = 0;
+                        *input_samples_consumed = InSamples::ZERO;
                     }
                     ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
-                        r.input_samples_consumed = 0;
+                        r.input_samples_consumed = InSamples::ZERO;
                     }
                     #[cfg(feature = "rubato-fft")]
                     ResampleInner::Fft(r) => {
-                        r.input_samples_consumed = 0;
+                        r.input_samples_consumed = InSamples::ZERO;
                     }
                 }
             }
@@ -522,6 +523,6 @@ where
         let upper =
             input_upper.map(|upper| buffered_remaining + (upper as Float * ratio).ceil() as usize);
 
-        (lower, upper)
+        (lower.raw(), upper.map(|u| u.raw()))
     }
 }

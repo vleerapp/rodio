@@ -6,19 +6,20 @@
 
 use std::fmt;
 
+use crate::common::OutSamples;
 use crate::Sample;
 use dasp_sample::Sample as _;
 
 /// Fixed-capacity sample buffer with a read cursor.
-pub(crate) struct Buffer {
+pub(crate) struct OutputBuffer {
     data: Box<[Sample]>,
-    pos: usize,
-    len: usize,
+    pos: OutSamples,
+    len: OutSamples,
 }
 
-impl fmt::Debug for Buffer {
+impl fmt::Debug for OutputBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Buffer")
+        f.debug_struct("OutputBuffer")
             .field("capacity", &self.data.len())
             .field("pos", &self.pos)
             .field("len", &self.len)
@@ -26,29 +27,32 @@ impl fmt::Debug for Buffer {
     }
 }
 
-impl Buffer {
+impl OutputBuffer {
     /// Create a new buffer with the given capacity, initialized to equilibrium samples.
-    pub(crate) fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: OutSamples) -> Self {
         Self {
-            data: vec![Sample::EQUILIBRIUM; capacity].into_boxed_slice(),
-            pos: 0,
-            len: 0,
+            data: vec![Sample::EQUILIBRIUM; capacity.raw()].into_boxed_slice(),
+            pos: OutSamples::ZERO,
+            len: OutSamples::ZERO,
         }
     }
 
     /// Reset for a new fill: rewind cursor to 0 and record the number of valid samples.
-    pub(crate) fn reset(&mut self, filled: usize) {
-        self.pos = 0;
+    pub(crate) fn rewind_to(&mut self, filled: OutSamples) {
+        self.pos = OutSamples::ZERO;
         self.len = filled;
     }
 
     /// Advance the cursor by `n` samples (capped at `len`).
-    pub(crate) fn skip(&mut self, n: usize) {
-        self.pos = (self.pos + n).min(self.len);
+    /// returns items skipped
+    pub(crate) fn skip(&mut self, n: OutSamples) -> OutSamples {
+        let n = n.min(self.remaining());
+        self.pos += n;
+        n
     }
 
     /// Shrink `len` so at most `remaining` more samples will be returned from the cursor.
-    pub(crate) fn cap_to_remaining(&mut self, remaining: usize) {
+    pub(crate) fn cap_to_remaining(&mut self, remaining: OutSamples) {
         self.len = self.len.min(self.pos + remaining);
     }
 
@@ -62,24 +66,19 @@ impl Buffer {
     #[inline]
     pub(crate) fn read(&mut self) -> Sample {
         debug_assert!(!self.is_empty(), "read from empty Buffer");
-        let s = self.data[self.pos];
+        let s = self.data[self.pos.raw()];
         self.pos += 1;
         s
     }
 
     /// Total capacity of the backing allocation.
-    pub(crate) fn capacity(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Number of valid samples set by the last `reset` call.
-    pub(crate) fn len(&self) -> usize {
-        self.len
+    pub(crate) fn capacity(&self) -> OutSamples {
+        OutSamples(self.data.len())
     }
 
     /// Number of samples remaining before the cursor reaches the end.
     #[inline]
-    pub(crate) fn remaining(&self) -> usize {
+    pub(crate) fn remaining(&self) -> OutSamples {
         self.len - self.pos
     }
 
