@@ -7,11 +7,11 @@ use crate::common::{ChannelCount, SampleRate};
 use crate::{Float, Sample, Source};
 
 use super::buffer::Buffer;
-use super::builder::{Poly, Sinc, WindowFunction};
+use super::builder::{Poly, Interpolation, WindowFunction};
 
 #[derive(thiserror::Error, Debug)]
 #[error("Failed to create resampler")]
-pub(super) struct ResamplerCreationError(#[from] rubato::ResamplerConstructionError);
+pub struct ResamplerCreationError(#[from] rubato::ResamplerConstructionError);
 
 /// Type alias for Async (polynomial/sinc) resampler.
 pub type RubatoAsyncResample<I> = RubatoResample<I, rubato::Async<Sample>>;
@@ -375,7 +375,7 @@ impl<I: Source> RubatoAsyncResample<I> {
         sinc_len: usize,
         f_cutoff: Float,
         oversampling_factor: usize,
-        interpolation: Sinc,
+        interpolation: Interpolation,
         window: WindowFunction,
     ) -> Result<Self, ResamplerCreationError> {
         let source_rate = input.sample_rate();

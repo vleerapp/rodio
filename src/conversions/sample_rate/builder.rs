@@ -2,7 +2,8 @@
 
 use std::num::NonZero;
 
-use crate::Float;
+use crate::conversions::sample_rate::rubato::RubatoAsyncResample;
+use crate::{Float, SampleRate};
 
 const DEFAULT_CHUNK_SIZE: usize = 1024;
 #[cfg(feature = "rubato-fft")]
@@ -48,7 +49,7 @@ impl From<Poly> for rubato::PolynomialDegree {
 /// Controls how intermediate values are calculated between precomputed sinc points
 /// in the windowed sinc filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Sinc {
+pub enum Interpolation {
     /// No interpolation - picks nearest intermediate point.
     ///
     /// Optimal when upsampling by exact ratios (e.g., 48kHz and 96kHz) and the oversampling factor
@@ -81,13 +82,13 @@ pub enum Sinc {
     Cubic,
 }
 
-impl From<Sinc> for rubato::SincInterpolationType {
-    fn from(sinc: Sinc) -> Self {
+impl From<Interpolation> for rubato::SincInterpolationType {
+    fn from(sinc: Interpolation) -> Self {
         match sinc {
-            Sinc::Nearest => rubato::SincInterpolationType::Nearest,
-            Sinc::Linear => rubato::SincInterpolationType::Linear,
-            Sinc::Quadratic => rubato::SincInterpolationType::Quadratic,
-            Sinc::Cubic => rubato::SincInterpolationType::Cubic,
+            Interpolation::Nearest => rubato::SincInterpolationType::Nearest,
+            Interpolation::Linear => rubato::SincInterpolationType::Linear,
+            Interpolation::Quadratic => rubato::SincInterpolationType::Quadratic,
+            Interpolation::Cubic => rubato::SincInterpolationType::Cubic,
         }
     }
 }
@@ -164,7 +165,7 @@ impl Default for PolyConfigBuilder {
 pub struct SincConfigBuilder {
     sinc_len: usize,
     oversampling_factor: usize,
-    interpolation: Sinc,
+    interpolation: Interpolation,
     window: WindowFunction,
     f_cutoff: Float,
     chunk_size: usize,
@@ -179,7 +180,7 @@ impl Default for SincConfigBuilder {
             sinc_len: 256,
             window: WindowFunction::default(),
             oversampling_factor: 128,
-            interpolation: Sinc::default(),
+            interpolation: Interpolation::default(),
             f_cutoff: 0.95,
             chunk_size: DEFAULT_CHUNK_SIZE,
             #[cfg(feature = "rubato-fft")]
@@ -217,26 +218,60 @@ pub enum ResampleConfig {
         chunk_size: usize,
     },
     /// Sinc resampling (high quality, anti-aliasing)
-    Sinc {
-        /// Length of the windowed sinc interpolation filter
-        sinc_len: usize,
-        /// Number of entries per tap in the precomputed sinc filter lookup table.
-        ///
-        /// See [`SincConfigBuilder::oversampling_factor`] for details.
-        oversampling_factor: usize,
-        /// Interpolation type for filter table lookup
-        interpolation: Sinc,
-        /// Window function to use
-        window: WindowFunction,
-        /// Cutoff frequency of the sinc interpolation filter relative to Nyquist (0.0-1.0)
-        f_cutoff: Float,
-        /// Desired chunk size in frames
-        chunk_size: usize,
-        /// Desired number of sub chunks to use for processing
-        #[cfg(feature = "rubato-fft")]
-        #[cfg_attr(docsrs, doc(cfg(feature = "rubato-fft")))]
-        sub_chunks: usize,
-    },
+    Sinc(Sinc),
+}
+
+#[derive(Debug, Clone)]
+pub struct Sinc {
+    /// Length of the windowed sinc interpolation filter
+    pub sinc_len: usize,
+    /// Number of entries per tap in the precomputed sinc filter lookup table.
+    ///
+    /// See [`SincConfigBuilder::oversampling_factor`] for details.
+    pub oversampling_factor: usize,
+    /// Interpolation type for filter table lookup
+    pub interpolation: Interpolation,
+    /// Window function to use
+    pub window: WindowFunction,
+    /// Cutoff frequency of the sinc interpolation filter relative to Nyquist (0.0-1.0)
+    pub f_cutoff: Float,
+    /// Desired chunk size in frames
+    pub chunk_size: usize,
+    /// Desired number of sub chunks to use for processing
+    #[cfg(feature = "rubato-fft")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "rubato-fft")))]
+    pub sub_chunks: usize,
+}
+
+impl Sinc {
+    pub(crate) fn build<S: crate::Source>(
+        self,
+        source: S,
+        target_rate: SampleRate,
+    ) -> RubatoAsyncResample<S> {
+        super::rubato::RubatoAsyncResample::new_sinc(
+            source,
+            target_rate,
+            self.chunk_size,
+            self.sinc_len,
+            self.f_cutoff,
+            self.oversampling_factor,
+            self.interpolation,
+            self.window,
+        )
+        .expect("Failed to create sinc resampler")
+    }
+
+    pub(crate) fn is_supported_fixed_ratio(
+        &self,
+        target_rate: SampleRate,
+        source_rate: SampleRate,
+    ) -> bool {
+        let g = crate::math::gcd(target_rate.get(), source_rate.get());
+        let numer = target_rate.get() / g;
+        let denom = source_rate.get() / g;
+        numer <= super::MAX_FIXED_RATIO && denom <= super::MAX_FIXED_RATIO
+    }
 }
 
 impl ResampleConfig {
@@ -244,64 +279,64 @@ impl ResampleConfig {
     pub fn very_fast() -> Self {
         let sinc_len = 64;
         let window = WindowFunction::Hann2;
-        Self::Sinc {
+        Self::Sinc(Sinc {
             sinc_len,
             window,
             oversampling_factor: 1024,
-            interpolation: Sinc::Linear,
+            interpolation: Interpolation::Linear,
             f_cutoff: rubato::calculate_cutoff(sinc_len, window.into()),
             chunk_size: DEFAULT_CHUNK_SIZE,
             #[cfg(feature = "rubato-fft")]
             sub_chunks: DEFAULT_SUB_CHUNKS,
-        }
+        })
     }
 
     /// Create a fast sinc resampling configuration.
     pub fn fast() -> Self {
         let sinc_len = 128;
         let window = WindowFunction::Blackman2;
-        Self::Sinc {
+        Self::Sinc(Sinc {
             sinc_len,
             window,
             oversampling_factor: 1024,
-            interpolation: Sinc::Linear,
+            interpolation: Interpolation::Linear,
             f_cutoff: rubato::calculate_cutoff(sinc_len, window.into()),
             chunk_size: DEFAULT_CHUNK_SIZE,
             #[cfg(feature = "rubato-fft")]
             sub_chunks: DEFAULT_SUB_CHUNKS,
-        }
+        })
     }
 
     /// Create a balanced sinc resampling configuration.
     pub fn balanced() -> Self {
         let sinc_len = 192;
         let window = WindowFunction::BlackmanHarris2;
-        Self::Sinc {
+        Self::Sinc(Sinc {
             sinc_len,
             window,
             oversampling_factor: 512,
-            interpolation: Sinc::Quadratic,
+            interpolation: Interpolation::Quadratic,
             f_cutoff: rubato::calculate_cutoff(sinc_len, window.into()),
             chunk_size: DEFAULT_CHUNK_SIZE,
             #[cfg(feature = "rubato-fft")]
             sub_chunks: DEFAULT_SUB_CHUNKS,
-        }
+        })
     }
 
     /// Create an accurate sinc resampling configuration.
     pub fn accurate() -> Self {
         let sinc_len = 256;
         let window = WindowFunction::BlackmanHarris2;
-        Self::Sinc {
+        Self::Sinc(Sinc {
             sinc_len,
             window,
             oversampling_factor: 256,
-            interpolation: Sinc::Cubic,
+            interpolation: Interpolation::Cubic,
             f_cutoff: rubato::calculate_cutoff(sinc_len, window.into()),
             chunk_size: DEFAULT_CHUNK_SIZE,
             #[cfg(feature = "rubato-fft")]
             sub_chunks: DEFAULT_SUB_CHUNKS,
-        }
+        })
     }
 
     /// Nearest-neighbor (zero-order hold) polynomial resampling. Fastest, no anti-aliasing.
@@ -400,7 +435,7 @@ impl SincConfigBuilder {
     }
 
     /// Set interpolation type.
-    pub fn interpolation(mut self, interpolator: Sinc) -> Self {
+    pub fn interpolation(mut self, interpolator: Interpolation) -> Self {
         self.interpolation = interpolator;
         self
     }
@@ -467,7 +502,7 @@ impl SincConfigBuilder {
 
     /// Build the final [`ResampleConfig`].
     pub fn build(self) -> ResampleConfig {
-        ResampleConfig::Sinc {
+        ResampleConfig::Sinc(Sinc {
             sinc_len: self.sinc_len,
             oversampling_factor: self.oversampling_factor,
             interpolation: self.interpolation,
@@ -476,7 +511,7 @@ impl SincConfigBuilder {
             chunk_size: self.chunk_size,
             #[cfg(feature = "rubato-fft")]
             sub_chunks: self.sub_chunks,
-        }
+        })
     }
 }
 

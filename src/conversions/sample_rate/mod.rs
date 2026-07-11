@@ -18,12 +18,12 @@
 //! ```rust
 //! use rodio::math::nz;
 //! use rodio::source::{SineWave, Source, ResampleConfig};
-//! use rodio::conversions::{SampleRateConverter, Sinc, WindowFunction};
+//! use rodio::conversions::{SampleRateConverter, Interpolation, WindowFunction};
 //!
 //! let source = SineWave::new(440.0);
 //! let config = ResampleConfig::sinc()                  // Sinc resampling
 //!     .sinc_len(nz!(256))                              // 256-tap filter
-//!     .interpolation(Sinc::Cubic)                      // Cubic interpolation
+//!     .interpolation(Interpolation::Cubic)             // Cubic interpolation
 //!     .window(WindowFunction::BlackmanHarris2)         // Squared Blackman-Harris window
 //!     .chunk_size(nz!(512))                            // Low latency (5.3 ms @ 1-channel 96 kHz)
 //!     .build();
@@ -95,7 +95,7 @@ use rubato::RubatoFftResample;
 use rubato::{ResampleInner, RubatoAsyncResample};
 
 pub use builder::{
-    Poly, PolyConfigBuilder, ResampleConfig, Sinc, SincConfigBuilder, WindowFunction,
+    Interpolation, Poly, PolyConfigBuilder, ResampleConfig, SincConfigBuilder, WindowFunction,
 };
 
 /// Maximum for optimized fixed-ratio resampling: 44.1 and 384 kHz (147:1280).
@@ -189,82 +189,29 @@ where
                             .expect("Failed to create polynomial resampler");
                     ResampleInner::Poly(resampler)
                 }
-                #[cfg(feature = "rubato-fft")]
-                ResampleConfig::Sinc {
-                    sinc_len,
-                    oversampling_factor,
-                    interpolation,
-                    window,
-                    f_cutoff,
-                    chunk_size,
-                    sub_chunks,
-                } => {
-                    let g = gcd(target_rate.get(), source_rate.get());
-                    let numer = target_rate.get() / g;
-                    let denom = source_rate.get() / g;
-                    if numer <= MAX_FIXED_RATIO && denom <= MAX_FIXED_RATIO {
-                        // Use FFT resampler for optimal performance
-                        let resampler =
-                            RubatoFftResample::new(source, target_rate, *chunk_size, *sub_chunks)
-                                .expect("Failed to create FFT resampler");
-                        ResampleInner::Fft(resampler)
-                    } else {
-                        let resampler = RubatoAsyncResample::new_sinc(
+                ResampleConfig::Sinc(sinc) => {
+                    let mut sinc = sinc.clone();
+                    #[cfg(feature = "rubato-fft")]
+                    if sinc.is_supported_fixed_ratio(target_rate, source_rate) {
+                        let resampler = RubatoFftResample::new(
                             source,
                             target_rate,
-                            *chunk_size,
-                            *sinc_len,
-                            *f_cutoff,
-                            *oversampling_factor,
-                            *interpolation,
-                            *window,
+                            *sinc.chunk_size,
+                            *sinc.sub_chunks,
                         )
-                        .expect("Failed to create sinc resampler");
-                        ResampleInner::Sinc(resampler)
+                        .expect("Failed to create FFT resampler");
+                        return ResampleInner::Fft(resampler);
                     }
-                }
-                #[cfg(not(feature = "rubato-fft"))]
-                ResampleConfig::Sinc {
-                    sinc_len,
-                    oversampling_factor,
-                    interpolation,
-                    window,
-                    f_cutoff,
-                    chunk_size,
-                } => {
-                    let g = gcd(target_rate.get(), source_rate.get());
-                    let numer = target_rate.get() / g;
-                    let denom = source_rate.get() / g;
-                    if numer <= MAX_FIXED_RATIO && denom <= MAX_FIXED_RATIO {
-                        // Fixed ratio without FFT - use Sinc::Nearest optimization
-                        // Set oversampling_factor to match the ratio for optimal performance
+
+                    if sinc.is_supported_fixed_ratio(target_rate, source_rate) {
+                        sinc.interpolation = Interpolation::Nearest;
+                        let g = gcd(target_rate.get(), source_rate.get());
+                        let numer = target_rate.get() / g;
+                        let denom = source_rate.get() / g;
                         let ratio = numer.max(denom) as usize;
-                        let resampler = RubatoAsyncResample::new_sinc(
-                            source,
-                            target_rate,
-                            *chunk_size,
-                            *sinc_len,
-                            *f_cutoff,
-                            ratio,
-                            Sinc::Nearest,
-                            *window,
-                        )
-                        .expect("Failed to create optimized sinc resampler");
-                        ResampleInner::Sinc(resampler)
-                    } else {
-                        let resampler = RubatoAsyncResample::new_sinc(
-                            source,
-                            target_rate,
-                            *chunk_size,
-                            *sinc_len,
-                            *f_cutoff,
-                            *oversampling_factor,
-                            *interpolation,
-                            *window,
-                        )
-                        .expect("Failed to create sinc resampler");
-                        ResampleInner::Sinc(resampler)
+                        sinc.oversampling_factor = ratio;
                     }
+                    ResampleInner::Sinc(sinc.build(source, target_rate))
                 }
             }
         }
