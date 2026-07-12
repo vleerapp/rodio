@@ -140,6 +140,8 @@ macro_rules! num_wrapper_shared {
     ($neutral:ident) => {
         #[allow(dead_code)]
         pub const ZERO: Self = Self(0);
+        #[allow(dead_code)]
+        pub const MAX: Self = Self(usize::MAX);
 
         #[allow(dead_code)]
         #[must_use]
@@ -199,3 +201,19 @@ macro_rules! frame_wrapper {
 frame_wrapper!(InFrameCount, InSamples);
 frame_wrapper!(OutFrameCount, OutSamples);
 frame_wrapper!(FrameCount, SampleCount);
+
+macro_rules! in_wrapper_shared {
+    ($in:ident, $out:ident) => {
+        impl $in {
+            #[allow(dead_code)]
+            pub fn resampled_by(&self, ratio: f32) -> $out {
+                let raw = self.raw() as Float * ratio as Float;
+                let raw = raw.ceil() as usize;
+                $out(raw)
+            }
+        }
+    };
+}
+
+in_wrapper_shared!(InFrameCount, OutFrameCount);
+in_wrapper_shared!(InSamples, OutSamples);

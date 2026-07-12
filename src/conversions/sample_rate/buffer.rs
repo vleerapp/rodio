@@ -1,89 +1,128 @@
 //! Fixed-capacity sample buffer with a read cursor.
 //!
-//! Holds one chunk of resampled output. Callers reset it with the number of freshly written
-//! samples, optionally skip delay samples at the head, optionally cap it to trim filter
-//! artifacts at the tail, and then drain it sample-by-sample.
+use std::fmt::{Debug, Write};
 
-use std::fmt;
+use crate::common::{FrameCount, OutFrameCount, OutSamples, SampleCount};
+use crate::{ChannelCount, Sample, SampleRate};
 
-use crate::common::OutSamples;
-use crate::Sample;
-use dasp_sample::Sample as _;
-
-/// Fixed-capacity sample buffer with a read cursor.
-pub(crate) struct OutputBuffer {
-    data: Box<[Sample]>,
+pub(crate) struct Output {
+    start: OutSamples,
     pos: OutSamples,
-    len: OutSamples,
+    end: OutSamples,
+
+    data: Box<[Sample]>,
+    pub channels: ChannelCount,
+    pub source_rate: SampleRate,
 }
 
-impl fmt::Debug for OutputBuffer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OutputBuffer")
-            .field("capacity", &self.data.len())
+impl Debug for Output {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Output")
+            .field("start", &self.start)
             .field("pos", &self.pos)
-            .field("len", &self.len)
+            .field("end", &self.end)
+            .field("data", &LimitLength(&self.data))
+            .field("channels", &self.channels)
+            .field("source_rate", &self.source_rate)
             .finish()
     }
 }
 
-impl OutputBuffer {
-    /// Create a new buffer with the given capacity, initialized to equilibrium samples.
-    pub(crate) fn new(capacity: OutSamples) -> Self {
+struct LimitLength<'a>(&'a [Sample]);
+
+impl Debug for LimitLength<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[")?;
+        for element in self.0.iter().take(3) {
+            f.write_str("\n\t")?;
+            f.write_fmt(format_args!("{element:?}"))?;
+            f.write_char(',')?;
+        }
+
+        if let Some(hidden) = self.0.len().checked_sub(6) {
+            f.write_str("\n\t... ")?;
+            f.write_fmt(format_args!(" (hiding {hidden} entries)"))?;
+        }
+
+        for element in self.0.iter().rev().take(3).rev() {
+            f.write_str("\n\t")?;
+            f.write_fmt(format_args!("{element:?}"))?;
+            f.write_char(',')?;
+        }
+
+        f.write_str("\n]")
+    }
+}
+
+impl Output {
+    pub(super) fn new(
+        source_rate: SampleRate,
+        channels: ChannelCount,
+        capacity: FrameCount,
+    ) -> Self {
+        let mut data = Vec::new();
+        data.reserve_exact(capacity.samples(channels).raw());
+        data.resize(data.capacity(), 0.0);
         Self {
-            data: vec![Sample::EQUILIBRIUM; capacity.raw()].into_boxed_slice(),
+            start: OutSamples::ZERO,
             pos: OutSamples::ZERO,
-            len: OutSamples::ZERO,
+            end: OutSamples::ZERO,
+            data: data.into_boxed_slice(),
+            channels,
+            source_rate,
         }
     }
 
-    /// Reset for a new fill: rewind cursor to 0 and record the number of valid samples.
-    pub(crate) fn rewind_to(&mut self, filled: OutSamples) {
+    pub(super) fn capacity(&self) -> FrameCount {
+        SampleCount(self.data.len()).frames(self.channels)
+    }
+
+    pub(super) fn len(&self) -> OutSamples {
+        self.end - self.pos
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.len().raw() == 0
+    }
+
+    pub(super) fn reset(&mut self) -> &mut [Sample] {
         self.pos = OutSamples::ZERO;
-        self.len = filled;
-    }
-
-    /// Advance the cursor by `n` samples (capped at `len`).
-    /// returns items skipped
-    pub(crate) fn skip(&mut self, n: OutSamples) -> OutSamples {
-        let n = n.min(self.remaining());
-        self.pos += n;
-        n
-    }
-
-    /// Shrink `len` so at most `remaining` more samples will be returned from the cursor.
-    pub(crate) fn cap_to_remaining(&mut self, remaining: OutSamples) {
-        self.len = self.len.min(self.pos + remaining);
-    }
-
-    /// True when the cursor has reached the end of the valid data.
-    #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.pos >= self.len
-    }
-
-    /// Read the next sample and advance the cursor. Panics in debug if the buffer is empty.
-    #[inline]
-    pub(crate) fn read(&mut self) -> Sample {
-        debug_assert!(!self.is_empty(), "read from empty Buffer");
-        let s = self.data[self.pos.raw()];
-        self.pos += 1;
-        s
-    }
-
-    /// Total capacity of the backing allocation.
-    pub(crate) fn capacity(&self) -> OutSamples {
-        OutSamples(self.data.len())
-    }
-
-    /// Number of samples remaining before the cursor reaches the end.
-    #[inline]
-    pub(crate) fn remaining(&self) -> OutSamples {
-        self.len - self.pos
-    }
-
-    /// Full backing slice for writing via an audio adapter.
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [Sample] {
+        self.start = OutSamples::ZERO;
+        self.end = OutSamples::ZERO;
         &mut self.data
+    }
+
+    pub(super) fn set_start(&mut self, start: OutFrameCount) {
+        self.start = start.samples(self.channels);
+        self.pos = self.start;
+        assert!(self.start.raw() <= self.data.len());
+        assert!(
+            self.start <= self.end,
+            "start: {start:?}, end: {:?}",
+            self.end
+        );
+    }
+
+    pub(super) fn set_end(&mut self, end: OutFrameCount) {
+        self.end = end.samples(self.channels);
+        assert!(self.end.raw() <= self.data.len());
+    }
+
+    pub(super) fn current_span_len(&self) -> usize {
+        (self.end - self.start).raw()
+    }
+}
+
+impl Iterator for Output {
+    type Item = Sample;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.end {
+            None
+        } else {
+            let sample = self.data[self.pos.raw()];
+            self.pos += 1usize;
+            Some(sample)
+        }
     }
 }

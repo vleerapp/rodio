@@ -77,12 +77,12 @@
 
 use std::time::Duration;
 
-use crate::common::InSamples;
+use crate::common::{InSamples, OutSamples};
 use crate::source::{reset_seek_span_tracking, SeekError};
 use crate::{
     common::{ChannelCount, Sample, SampleRate},
     math::gcd,
-    Float, Source,
+    Source,
 };
 
 mod buffer;
@@ -286,45 +286,10 @@ where
 {
     #[inline]
     fn current_span_len(&self) -> Option<usize> {
-        let (input_span_len, input_sample_rate, input_exhausted, output_has_samples, output_len) =
-            match self.resampler() {
-                ResampleInner::Passthrough { source, .. } => return source.current_span_len(),
-                ResampleInner::Poly(resampler) | ResampleInner::Sinc(resampler) => (
-                    resampler.input.current_span_len(),
-                    resampler.input.sample_rate(),
-                    resampler.input.is_exhausted(),
-                    resampler.output_has_samples(),
-                    resampler.output_span_len(),
-                ),
-                #[cfg(feature = "rubato-fft")]
-                ResampleInner::Fft(resampler) => (
-                    resampler.input.current_span_len(),
-                    resampler.input.sample_rate(),
-                    resampler.input.is_exhausted(),
-                    resampler.output_has_samples(),
-                    resampler.output_span_len(),
-                ),
-            };
-
-        let g = gcd(self.sample_rate().get(), input_sample_rate.get());
-        let numer = self.sample_rate().get() / g;
-        let denom = input_sample_rate.get() / g;
-        if denom == 1 {
-            // Integer upsampling (2x, 3x, etc.) - always exact and frame-aligned
-            input_span_len.map(|len| numer as usize * len)
-        } else {
-            // When the ratio contains a fraction, we cannot choose the floor or ceiling
-            // arbitrarily, because the resampler may produce either based on its internal state
-            if output_has_samples {
-                // Running state: we are iterating over our buffer with resampled samples
-                Some(output_len.raw())
-            } else if input_exhausted {
-                // End state: we are at the end of our buffer and the source is exhausted
-                Some(0)
-            } else {
-                // Initial state: buffer is empty, actual output count is unknown until the first
-                // process_into_buffer call. Return one frame so consumers recheck promptly.
-                Some(self.channels().get() as usize)
+        match self.resampler() {
+            ResampleInner::Passthrough { source, .. } => source.current_span_len(),
+            ResampleInner::Poly(resampler) | ResampleInner::Sinc(resampler) => {
+                resampler.span_length()
             }
         }
     }
@@ -376,7 +341,7 @@ where
             }
             ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
                 reset_seek_span_tracking(
-                    r.input_samples_consumed.raw_mut(),
+                    r.pos_in_current_span.raw_mut(),
                     &mut self.cached_input_span_len,
                     position,
                     input_span_len,
@@ -426,11 +391,10 @@ where
             }
         }
 
-        let cached = self.cached_input_span_len;
         let sample = match self.resampler_mut() {
             ResampleInner::Passthrough { source, .. } => source.next()?,
-            ResampleInner::Poly(resampler) => resampler.next_sample(cached.map(InSamples))?,
-            ResampleInner::Sinc(resampler) => resampler.next_sample(cached.map(InSamples))?,
+            ResampleInner::Poly(resampler) => resampler.next_sample()?,
+            ResampleInner::Sinc(resampler) => resampler.next_sample()?,
             #[cfg(feature = "rubato-fft")]
             ResampleInner::Fft(resampler) => resampler.next_sample(cached)?,
         };
@@ -448,12 +412,14 @@ where
                 source_rate,
                 ..
             } => {
-                *input_samples_consumed += 1;
+                *input_samples_consumed += 1usize;
                 (*channels, *source_rate, *input_samples_consumed)
             }
-            ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
-                (r.channels, r.source_rate, r.input_samples_consumed)
-            }
+            ResampleInner::Poly(r) | ResampleInner::Sinc(r) => (
+                r.output.channels,
+                r.input.sample_rate(),
+                r.pos_in_current_span,
+            ),
             #[cfg(feature = "rubato-fft")]
             ResampleInner::Fft(r) => (r.channels, r.source_rate, r.input_samples_consumed),
         };
@@ -486,7 +452,7 @@ where
                         *input_samples_consumed = InSamples::ZERO;
                     }
                     ResampleInner::Poly(r) | ResampleInner::Sinc(r) => {
-                        r.input_samples_consumed = InSamples::ZERO;
+                        r.pos_in_current_span = InSamples::ZERO;
                     }
                     #[cfg(feature = "rubato-fft")]
                     ResampleInner::Fft(r) => {
@@ -501,12 +467,20 @@ where
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (input_hint, source_rate, buffered_remaining) = match self.resampler() {
-            ResampleInner::Passthrough { source, .. } => return source.size_hint(),
+        match self.resampler() {
+            ResampleInner::Passthrough { source, .. } => source.size_hint(),
             ResampleInner::Poly(resampler) | ResampleInner::Sinc(resampler) => {
-                let input_hint = resampler.input.size_hint();
-                let buffered_remaining = resampler.output_remaining();
-                (input_hint, resampler.source_rate, buffered_remaining)
+                let adjusted_for_resampling = |samples| {
+                    InSamples(samples).resampled_by(resampler.resample_ratio)
+                        + resampler.output.len()
+                        + resampler
+                            .in_resampler_state
+                            .samples(resampler.output.channels)
+                };
+                let (lower, upper) = resampler.input.size_hint();
+                let lower = adjusted_for_resampling(lower);
+                let upper = upper.map(adjusted_for_resampling);
+                (lower.raw(), upper.as_ref().map(OutSamples::raw))
             }
             #[cfg(feature = "rubato-fft")]
             ResampleInner::Fft(resampler) => {
@@ -514,15 +488,6 @@ where
                 let buffered_remaining = resampler.output_remaining();
                 (input_hint, resampler.source_rate, buffered_remaining)
             }
-        };
-
-        let (input_lower, input_upper) = input_hint;
-        let ratio = self.target_rate.get() as Float / source_rate.get() as Float;
-
-        let lower = buffered_remaining + (input_lower as Float * ratio).ceil() as usize;
-        let upper =
-            input_upper.map(|upper| buffered_remaining + (upper as Float * ratio).ceil() as usize);
-
-        (lower.raw(), upper.map(|u| u.raw()))
+        }
     }
 }
