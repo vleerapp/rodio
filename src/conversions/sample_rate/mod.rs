@@ -474,7 +474,7 @@ where
                     InSamples(samples).resampled_by(resampler.resample_ratio)
                         + resampler.output.len()
                         + resampler
-                            .in_resampler_state
+                            .frames_being_resampled
                             .samples(resampler.output.channels)
                 };
                 let (lower, upper) = resampler.input.size_hint();

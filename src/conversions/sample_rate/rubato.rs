@@ -1,10 +1,9 @@
 //! Rubato resampler wrapper and implementations.
 
-use dasp_sample::Sample as _;
 use rubato::{audioadapter_buffers::direct::InterleavedSlice, Resampler};
 
 use crate::common::{ChannelCount, FrameCount, InFrameCount, InSamples, OutFrameCount, SampleRate};
-use crate::conversions::sample_rate::buffer::Output;
+use crate::conversions::sample_rate::buffer::{Input, Output};
 use crate::{Float, Sample, Source};
 
 use super::builder::{Interpolation, Poly, WindowFunction};
@@ -76,7 +75,7 @@ pub struct RubatoResample<I: Source, R: rubato::Resampler<Sample>> {
     pub input: I,
     pub resampler: R,
 
-    pub input_buffer: Vec<Sample>,
+    pub input_buffer: super::buffer::Input,
     pub(crate) output: super::buffer::Output,
 
     /// The following are cached at construction for parameter-change detection.
@@ -85,7 +84,7 @@ pub struct RubatoResample<I: Source, R: rubato::Resampler<Sample>> {
     pub output_delay_remaining: OutFrameCount,
     pub pos_in_current_span: InSamples,
 
-    pub in_resampler_state: OutFrameCount,
+    pub frames_being_resampled: OutFrameCount,
 }
 
 impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
@@ -140,13 +139,14 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
     // This is complicated since we need to handle changing sample rates (spans)
     #[inline(never)]
     fn resample_chunk(&mut self) -> Option<()> {
-        dbg!(self.input.is_exhausted(), &self.output);
         if self.input.is_exhausted() && self.resampler_empty() {
             return None;
         }
 
-        let frames_in = self.fill_input_buffer(self.output.channels);
-        self.in_resampler_state += frames_in.resampled_by(self.resample_ratio);
+        dbg!(self.frames_being_resampled);
+
+        let frames_in = self.fill_input_buffer();
+        self.frames_being_resampled += frames_in.resampled_by(self.resample_ratio);
         self.pos_in_current_span += frames_in.samples(self.output.channels);
 
         let needed_by_resampler = InFrameCount(self.resampler.input_frames_next());
@@ -158,10 +158,9 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
             partial_len,
             active_channels_mask: None,
         });
-        dbg!(frames_in, needed_by_resampler, partial_len);
 
         let input_adapter = InterleavedSlice::new(
-            &self.input_buffer,
+            self.input_buffer.as_slice(),
             self.output.channels.get().into(),
             needed_by_resampler.raw(),
         )
@@ -177,51 +176,48 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
             .process_into_buffer(&input_adapter, &mut output_adapter, indexing)
             .map(|(r#in, out)| (InFrameCount(r#in), OutFrameCount(out)))
             .expect("We always set up the input_buffer correctly");
-        dbg!(frames_out);
 
         if self.input.is_exhausted() && frames_out == OutFrameCount::ZERO {
             return None;
         }
 
-        let delay_in_output = self
-            .output_delay_remaining
-            .min(self.in_resampler_state.min(frames_out));
+        dbg!(&self.output.samples.iter().take(10).collect::<Vec<_>>());
+
+        let frames_out = self.frames_being_resampled.min(frames_out);
+
+        let delay_in_output = self.output_delay_remaining.min(frames_out);
         self.output_delay_remaining -= delay_in_output;
 
-        self.output.set_end(self.in_resampler_state.min(frames_out));
+        self.output.set_end(dbg!(frames_out));
         self.output.set_start(delay_in_output);
 
-        dbg!(self.in_resampler_state);
-        self.in_resampler_state -= self.output.len().frames(self.output.channels);
-        dbg!(self.in_resampler_state);
+        // something about this is incorrect. but why... (one too much)
+        self.frames_being_resampled -= self.output.len().frames(self.output.channels);
 
+        dbg!(&self.output);
         Some(())
     }
 
-    fn fill_input_buffer(&mut self, num_channels: ChannelCount) -> InFrameCount {
+    fn fill_input_buffer(&mut self) -> InFrameCount {
         let needed_by_resampler = InFrameCount(self.resampler.input_frames_next());
-        let current_span_length = self
-            .input
-            .current_span_len()
-            .map(InSamples)
-            .map(|s| s.frames(num_channels));
-        let frames_to_take =
-            needed_by_resampler.min(current_span_length.unwrap_or(InFrameCount::MAX));
+        let current_span_length = self.input.current_span_len().map(InSamples);
+        let frames_to_take = needed_by_resampler
+            .samples(self.output.channels)
+            .min(current_span_length.unwrap_or(InSamples::MAX));
 
-        let mut samples_taken = InSamples::ZERO;
-        for _ in 0..frames_to_take.samples(num_channels).raw() {
+        self.input_buffer.clear();
+        for _ in 0..frames_to_take.raw() {
             if let Some(sample) = self.input.next() {
                 self.input_buffer.push(sample);
-                samples_taken += 1usize;
             } else {
                 break;
             }
         }
-        samples_taken.frames(num_channels)
+        self.input_buffer.len().frames(self.output.channels)
     }
 
     fn resampler_empty(&self) -> bool {
-        self.in_resampler_state == OutFrameCount::ZERO
+        self.frames_being_resampled == OutFrameCount::ZERO
     }
 }
 
@@ -329,12 +325,12 @@ impl<I: Source> RubatoAsyncResample<I> {
         Self {
             input,
             resampler,
-            input_buffer: vec![Sample::EQUILIBRIUM; input_buf_size.samples(channels).raw()],
+            input_buffer: Input::new(input_buf_size.samples(channels)),
             output: Output::new(source_rate, channels, output_buf_size),
             pos_in_current_span: InSamples::ZERO,
             output_delay_remaining: initial_output_delay,
             resample_ratio,
-            in_resampler_state: OutFrameCount::ZERO,
+            frames_being_resampled: OutFrameCount::ZERO,
         }
     }
 }
