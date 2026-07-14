@@ -11,14 +11,27 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  msrv:
+    name: Get MSRV
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-msrv.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read MSRV from Cargo.toml
+        id: get-msrv
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   tests:
     name: Tests
+    needs: msrv
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
-        toolchain: ["1.89"]
         include:
           - os: macos-latest
             MACOS: true
@@ -31,8 +44,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev pkg-config libjack-jackd2-dev libjack-jackd2-0 libdbus-1-dev libpipewire-0.3-dev
         if: contains(matrix.os, 'ubuntu')
 
-      - name: Install ${{ matrix.toolchain }} toolchain
-        run: rustup toolchain install ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
+      - name: Install ${{ needs.msrv.outputs.version }} toolchain
+        run: rustup toolchain install ${{ needs.msrv.outputs.version }} && rustup default ${{ needs.msrv.outputs.version }}
 
       - name: Install stable toolchain for clippy
         run: rustup toolchain install stable
