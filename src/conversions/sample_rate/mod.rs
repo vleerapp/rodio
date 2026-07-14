@@ -88,7 +88,7 @@ mod buffer;
 mod builder;
 mod rubato;
 mod types;
-pub(crate) use types::{InSamples, OutSamples, InFrameCount, OutFrameCount};
+pub(crate) use types::{InFrameCount, InSamples, OutFrameCount, OutSamples};
 #[cfg(test)]
 mod tests;
 
@@ -198,8 +198,8 @@ where
                         let resampler = RubatoFftResample::new(
                             source,
                             target_rate,
-                            *sinc.chunk_size,
-                            *sinc.sub_chunks,
+                            sinc.chunk_size,
+                            sinc.sub_chunks,
                         )
                         .expect("Failed to create FFT resampler");
                         return ResampleInner::Fft(resampler);
@@ -292,6 +292,8 @@ where
             ResampleInner::Poly(resampler) | ResampleInner::Sinc(resampler) => {
                 resampler.span_length()
             }
+            #[cfg(feature = "rubato-fft")]
+            ResampleInner::Fft(resampler) => resampler.span_length(),
         }
     }
 
@@ -351,7 +353,7 @@ where
             #[cfg(feature = "rubato-fft")]
             ResampleInner::Fft(r) => {
                 reset_seek_span_tracking(
-                    &mut r.input_samples_consumed,
+                    r.pos_in_current_span.raw_mut(),
                     &mut self.cached_input_span_len,
                     position,
                     input_span_len,
@@ -397,7 +399,7 @@ where
             ResampleInner::Poly(resampler) => resampler.next_sample()?,
             ResampleInner::Sinc(resampler) => resampler.next_sample()?,
             #[cfg(feature = "rubato-fft")]
-            ResampleInner::Fft(resampler) => resampler.next_sample(cached)?,
+            ResampleInner::Fft(resampler) => resampler.next_sample()?,
         };
 
         // If input reports no span length, parameters are stable by contract
@@ -422,7 +424,11 @@ where
                 r.pos_in_current_span,
             ),
             #[cfg(feature = "rubato-fft")]
-            ResampleInner::Fft(r) => (r.channels, r.source_rate, r.input_samples_consumed),
+            ResampleInner::Fft(r) => (
+                r.output.channels,
+                r.input.sample_rate(),
+                r.pos_in_current_span,
+            ),
         };
 
         let input = self.resampler().input();
@@ -457,7 +463,7 @@ where
                     }
                     #[cfg(feature = "rubato-fft")]
                     ResampleInner::Fft(r) => {
-                        r.input_samples_consumed = InSamples::ZERO;
+                        r.pos_in_current_span = InSamples::ZERO;
                     }
                 }
             }
@@ -485,9 +491,17 @@ where
             }
             #[cfg(feature = "rubato-fft")]
             ResampleInner::Fft(resampler) => {
-                let input_hint = resampler.input.size_hint();
-                let buffered_remaining = resampler.output_remaining();
-                (input_hint, resampler.source_rate, buffered_remaining)
+                let adjusted_for_resampling = |samples| {
+                    InSamples(samples).resampled_by(resampler.resample_ratio)
+                        + resampler.output.len()
+                        + resampler
+                            .frames_being_resampled
+                            .samples(resampler.output.channels)
+                };
+                let (lower, upper) = resampler.input.size_hint();
+                let lower = adjusted_for_resampling(lower);
+                let upper = upper.map(adjusted_for_resampling);
+                (lower.raw(), upper.as_ref().map(OutSamples::raw))
             }
         }
     }

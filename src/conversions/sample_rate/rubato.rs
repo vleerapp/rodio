@@ -337,28 +337,21 @@ impl<I: Source> RubatoFftResample<I> {
             rubato::FixedSync::Output,
         )?;
 
-        let input_buf_size = resampler.input_frames_max();
-        let output_buf_size = resampler.output_frames_max();
+        let input_buf_size = InFrameCount(resampler.input_frames_max());
+        let output_buf_size = OutFrameCount(resampler.output_frames_max());
         let resample_ratio = target_rate.get() as Float / source_rate.get() as Float;
 
-        let output_delay_remaining = Self::calculate_delay_compensation(&resampler, channels);
+        let output_delay_remaining = RubatoFftResample::<I>::output_delay(&resampler);
 
         Ok(Self {
             input,
             resampler,
-            input_buffer: vec![Sample::EQUILIBRIUM; input_buf_size * channels.get() as usize]
-                .into_boxed_slice(),
-            output_buffer: OutputBuffer::new(output_buf_size * channels.get() as usize),
-            channels,
-            source_rate,
-            input_samples_consumed: 0,
-            input_exhausted: false,
-            total_input_frames: 0,
-            total_output_samples: 0,
-            real_frames_in_buffer: 0,
+            input_buffer: Input::new(input_buf_size.samples(channels)),
+            output: Output::new(source_rate, channels, output_buf_size),
+            pos_in_current_span: InSamples::ZERO,
             output_delay_remaining,
-            output_span_len: 0,
             resample_ratio,
+            frames_being_resampled: OutFrameCount::ZERO,
         })
     }
 }
