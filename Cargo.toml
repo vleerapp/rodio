@@ -8,7 +8,7 @@ repository = "https://github.com/RustAudio/rodio"
 documentation = "https://docs.rs/rodio"
 exclude = ["assets/**", "tests/**"]
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.95"
 
 [features]
 default = [

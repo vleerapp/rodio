@@ -1,5 +1,5 @@
 use super::*;
-use crate::common::FrameCount;
+use super::InFrameCount;
 use crate::source::{from_iter, SineWave};
 use crate::{nz, Source};
 use dasp_sample::ToSample;
@@ -205,7 +205,7 @@ quickcheck! {
 }
 
 /// Helper to create interleaved multi-channel test data using SineWave sources.
-fn create_test_input(frames: FrameCount, channels: ChannelCount) -> Vec<Sample> {
+fn create_test_input(frames: InFrameCount, channels: ChannelCount) -> Vec<Sample> {
     let frequencies = [440.0, 1000.0];
     let mut input = Vec::new();
 
@@ -246,7 +246,7 @@ fn test_sample_rate_conversions() {
             let to = SampleRate::new(to_rate).unwrap();
             let ch = ChannelCount::new(channels).unwrap();
 
-            let input_frames = FrameCount(100);
+            let input_frames = InFrameCount(100);
             let input = create_test_input(input_frames, ch);
             let input_samples = input.len();
 
@@ -279,7 +279,7 @@ fn test_current_span_len_excludes_delay() {
     let from = SampleRate::new(44100).unwrap();
     let to = SampleRate::new(48000).unwrap();
 
-    let input = create_test_input(FrameCount(2048), channels);
+    let input = create_test_input(InFrameCount(2048), channels);
     let source = from_iter(input.into_iter(), channels, from);
     // sinc_len=16 gives a non-zero output delay without being slow in debug builds
     let config = ResampleConfig::sinc()

@@ -2,7 +2,8 @@
 
 use rubato::{audioadapter_buffers::direct::InterleavedSlice, Resampler};
 
-use crate::common::{ChannelCount, FrameCount, InFrameCount, InSamples, OutFrameCount, SampleRate};
+use super::{InFrameCount, InSamples, OutFrameCount};
+use crate::common::{ChannelCount, SampleRate};
 use crate::conversions::sample_rate::buffer::{Input, Output};
 use crate::{Float, Sample, Source};
 
@@ -143,19 +144,15 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
             return None;
         }
 
-        dbg!(self.frames_being_resampled);
-
-        let frames_in = self.fill_input_buffer();
+        let needed_by_resampler = InFrameCount(self.resampler.input_frames_next());
+        let frames_in = self.fill_input_buffer(needed_by_resampler);
         self.frames_being_resampled += frames_in.resampled_by(self.resample_ratio);
         self.pos_in_current_span += frames_in.samples(self.output.channels);
-
-        let needed_by_resampler = InFrameCount(self.resampler.input_frames_next());
-        let partial_len = (frames_in < needed_by_resampler).then_some(frames_in.raw());
 
         let indexing = Some(&rubato::Indexing {
             input_offset: 0,
             output_offset: 0,
-            partial_len,
+            partial_len: (frames_in < needed_by_resampler).then_some(frames_in.raw()),
             active_channels_mask: None,
         });
 
@@ -181,25 +178,21 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
             return None;
         }
 
-        dbg!(&self.output.samples.iter().take(10).collect::<Vec<_>>());
-
-        let frames_out = self.frames_being_resampled.min(frames_out);
-
         let delay_in_output = self.output_delay_remaining.min(frames_out);
+        let resampled_frames = self.frames_being_resampled.min(frames_out);
+
         self.output_delay_remaining -= delay_in_output;
 
-        self.output.set_end(dbg!(frames_out));
         self.output.set_start(delay_in_output);
+        self.output.set_end(frames_out);
+        self.output.set_len(resampled_frames);
 
-        // something about this is incorrect. but why... (one too much)
         self.frames_being_resampled -= self.output.len().frames(self.output.channels);
 
-        dbg!(&self.output);
         Some(())
     }
 
-    fn fill_input_buffer(&mut self) -> InFrameCount {
-        let needed_by_resampler = InFrameCount(self.resampler.input_frames_next());
+    fn fill_input_buffer(&mut self, needed_by_resampler: InFrameCount) -> InFrameCount {
         let current_span_length = self.input.current_span_len().map(InSamples);
         let frames_to_take = needed_by_resampler
             .samples(self.output.channels)
@@ -244,21 +237,21 @@ impl<I: Source> RubatoAsyncResample<I> {
         )?;
 
         let input_buf_size = InFrameCount(resampler.input_frames_max());
-        let output_buf_size = FrameCount(resampler.output_frames_max());
+        let output_buf_size = OutFrameCount(resampler.output_frames_max());
 
         let initial_output_delay =
             RubatoResample::<I, rubato::Async<Sample>>::output_delay(&resampler);
 
-        Ok(Self::new_from(
+        Ok(Self {
             input,
             resampler,
-            input_buf_size,
-            output_buf_size,
-            channels,
-            source_rate,
-            initial_output_delay,
+            input_buffer: Input::new(input_buf_size.samples(channels)),
+            output: Output::new(source_rate, channels, output_buf_size),
+            pos_in_current_span: InSamples::ZERO,
+            output_delay_remaining: initial_output_delay,
             resample_ratio,
-        ))
+            frames_being_resampled: OutFrameCount::ZERO,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -295,34 +288,12 @@ impl<I: Source> RubatoAsyncResample<I> {
         )?;
 
         let input_buf_size = InFrameCount(resampler.input_frames_max());
-        let output_buf_size = FrameCount(resampler.output_frames_max());
+        let output_buf_size = OutFrameCount(resampler.output_frames_max());
 
         let initial_output_delay =
             RubatoResample::<I, rubato::Async<Sample>>::output_delay(&resampler);
 
-        Ok(Self::new_from(
-            input,
-            resampler,
-            input_buf_size,
-            output_buf_size,
-            channels,
-            source_rate,
-            initial_output_delay,
-            resample_ratio,
-        ))
-    }
-
-    fn new_from(
-        input: I,
-        resampler: rubato::Async<Sample>,
-        input_buf_size: InFrameCount,
-        output_buf_size: FrameCount,
-        channels: ChannelCount,
-        source_rate: SampleRate,
-        initial_output_delay: OutFrameCount,
-        resample_ratio: Float,
-    ) -> Self {
-        Self {
+        Ok(Self {
             input,
             resampler,
             input_buffer: Input::new(input_buf_size.samples(channels)),
@@ -331,7 +302,7 @@ impl<I: Source> RubatoAsyncResample<I> {
             output_delay_remaining: initial_output_delay,
             resample_ratio,
             frames_being_resampled: OutFrameCount::ZERO,
-        }
+        })
     }
 }
 

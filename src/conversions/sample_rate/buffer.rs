@@ -2,7 +2,7 @@
 //!
 use std::fmt::{Debug, Write};
 
-use crate::common::{FrameCount, InSamples, OutFrameCount, OutSamples, SampleCount};
+use super::{InSamples, OutFrameCount, OutSamples};
 use crate::{ChannelCount, Sample, SampleRate};
 
 pub(crate) struct Input {
@@ -116,7 +116,7 @@ impl Output {
     pub(super) fn new(
         source_rate: SampleRate,
         channels: ChannelCount,
-        capacity: FrameCount,
+        capacity: OutFrameCount,
     ) -> Self {
         let mut samples = Vec::new();
         samples.reserve_exact(capacity.samples(channels).raw());
@@ -131,8 +131,8 @@ impl Output {
         }
     }
 
-    pub(super) fn capacity(&self) -> FrameCount {
-        SampleCount(self.samples.len()).frames(self.channels)
+    pub(super) fn capacity(&self) -> OutFrameCount {
+        OutSamples(self.samples.len()).frames(self.channels)
     }
 
     pub(super) fn len(&self) -> OutSamples {
@@ -153,21 +153,31 @@ impl Output {
     pub(super) fn set_start(&mut self, start: OutFrameCount) {
         self.start = start.samples(self.channels);
         self.pos = self.start;
-        assert!(self.start.raw() <= self.samples.len());
-        assert!(
-            self.start <= self.end,
-            "start: {start:?}, end: {:?}",
-            self.end
-        );
     }
 
     pub(super) fn set_end(&mut self, end: OutFrameCount) {
         self.end = end.samples(self.channels);
-        assert!(self.end.raw() <= self.samples.len());
+    }
+
+    pub(crate) fn set_len(&mut self, len: OutFrameCount) {
+        self.end = self.end.min(self.start + len.samples(self.channels));
+        self.assert_view_makes_sense();
     }
 
     pub(super) fn current_span_len(&self) -> usize {
         (self.end - self.start).raw()
+    }
+
+    #[track_caller]
+    fn assert_view_makes_sense(&self) {
+        assert!(self.start.raw() <= self.samples.len());
+        assert!(
+            self.start <= self.end,
+            "start ({:?}) may not be after end ({:?})",
+            self.start,
+            self.end
+        );
+        assert!(self.end.raw() <= self.samples.len());
     }
 }
 

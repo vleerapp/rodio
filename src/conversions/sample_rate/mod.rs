@@ -77,7 +77,6 @@
 
 use std::time::Duration;
 
-use crate::common::{InSamples, OutSamples};
 use crate::source::{reset_seek_span_tracking, SeekError};
 use crate::{
     common::{ChannelCount, Sample, SampleRate},
@@ -88,6 +87,8 @@ use crate::{
 mod buffer;
 mod builder;
 mod rubato;
+mod types;
+pub(crate) use types::{InSamples, OutSamples, InFrameCount, OutFrameCount};
 #[cfg(test)]
 mod tests;
 
