@@ -142,7 +142,7 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
     fn resample_chunk(&mut self) -> Option<()> {
         let needed_by_resampler = InFrameCount(self.resampler.input_frames_next());
         let frames_in = self.fill_input_buffer(needed_by_resampler);
-        if frames_in == InFrameCount::ZERO && self.resampler_empty(){
+        if frames_in == InFrameCount::ZERO && self.resampler_empty() {
             return None;
         }
 

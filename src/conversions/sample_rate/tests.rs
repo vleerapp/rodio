@@ -1,5 +1,5 @@
-use super::*;
 use super::InFrameCount;
+use super::*;
 use crate::source::{from_iter, SineWave};
 use crate::{nz, Source};
 use dasp_sample::ToSample;

@@ -159,11 +159,11 @@ where
 
         let needs_rate_conversion = from_sample_rate != target_sample_rate;
         let needs_channel_conversion = from_channels != target_channels;
+        let config = ResampleConfig::poly().degree(Poly::Linear).build();
 
         match (needs_rate_conversion, needs_channel_conversion) {
             (false, false) => UniformInner::Passthrough(input),
             (true, false) => {
-                let config = ResampleConfig::poly().degree(Poly::Linear).build();
                 let rate_converted = SampleRateConverter::new(input, target_sample_rate, config);
                 UniformInner::SampleRate(rate_converted)
             }
@@ -172,22 +172,18 @@ where
                     ChannelCountConverter::new(input, from_channels, target_channels);
                 UniformInner::ChannelCount(channel_converted)
             }
+            (true, true) if target_channels > from_channels => {
+                let rate_converted = SampleRateConverter::new(input, target_sample_rate, config);
+                let channel_converted =
+                    ChannelCountConverter::new(rate_converted, from_channels, target_channels);
+                UniformInner::BothUpmix(channel_converted)
+            }
             (true, true) => {
-                let config = ResampleConfig::poly().degree(Poly::Linear).build();
-
-                if target_channels > from_channels {
-                    let rate_converted =
-                        SampleRateConverter::new(input, target_sample_rate, config);
-                    let channel_converted =
-                        ChannelCountConverter::new(rate_converted, from_channels, target_channels);
-                    UniformInner::BothUpmix(channel_converted)
-                } else {
-                    let channel_converted =
-                        ChannelCountConverter::new(input, from_channels, target_channels);
-                    let rate_converted =
-                        SampleRateConverter::new(channel_converted, target_sample_rate, config);
-                    UniformInner::BothDownmix(rate_converted)
-                }
+                let channel_converted =
+                    ChannelCountConverter::new(input, from_channels, target_channels);
+                let rate_converted =
+                    SampleRateConverter::new(channel_converted, target_sample_rate, config);
+                UniformInner::BothDownmix(rate_converted)
             }
         }
     }

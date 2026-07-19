@@ -20,7 +20,7 @@
 pub use self::channels::ChannelCountConverter;
 pub use self::sample::SampleTypeConverter;
 pub use self::sample_rate::{
-    Poly, PolyConfigBuilder, ResampleConfig, SampleRateConverter, Interpolation, SincConfigBuilder,
+    Interpolation, Poly, PolyConfigBuilder, ResampleConfig, SampleRateConverter, SincConfigBuilder,
     WindowFunction,
 };
 

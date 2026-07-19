@@ -1,6 +1,6 @@
+use crate::{ChannelCount, Float};
 use std::fmt::{Debug, Display};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
-use crate::{ChannelCount, Float};
 
 #[allow(dead_code)]
 pub(crate) const fn use_required_traits<T: Send + Sync + 'static + Display + Debug + Clone>() {}
@@ -118,8 +118,8 @@ macro_rules! in_wrapper_shared {
     ($in:ident, $out:ident) => {
         impl $in {
             #[allow(dead_code)]
-            pub fn resampled_by(&self, ratio: f32) -> $out {
-                let raw = self.raw() as Float * ratio as Float;
+            pub fn resampled_by(&self, ratio: Float) -> $out {
+                let raw = self.raw() as Float * ratio;
                 let raw = raw.ceil() as usize;
                 $out(raw)
             }

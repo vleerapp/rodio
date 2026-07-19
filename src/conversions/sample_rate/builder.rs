@@ -63,7 +63,7 @@ pub enum Interpolation {
     /// precomputed sinc coefficient table and draws a straight line between them. Because the sinc
     /// function is curved, this straight-line segment requires more intermediate points to push
     /// the resampling artefacts below the noise floor. This is achieved using a higher
-    /// [`oversampling_factor`](SincConfigBuilder::oversampling_factor). [`Cubic`](Sinc::Cubic)
+    /// [`oversampling_factor`](SincConfigBuilder::oversampling_factor). [`Cubic`](Interpolation::Cubic)
     /// fits a polynomial that follows the curvature, achieving the same accuracy with a smaller
     /// table.
     #[default]
@@ -427,8 +427,8 @@ impl SincConfigBuilder {
     ///
     /// A higher value packs more entries into the table, so adjacent entries are closer together
     /// and interpolation between them incurs less error. This matters most with
-    /// [`Sinc::Linear`] and [`Sinc::Quadratic`]; [`Sinc::Cubic`] achieves comparable accuracy
-    /// with a smaller table. Increases memory usage proportionally.
+    /// [`Interpolation::Linear`] and [`Interpolation::Quadratic`]; [`Interpolation::Cubic`]
+    /// achieves comparable accuracy with a smaller table. Increases memory usage proportionally.
     pub fn oversampling_factor(mut self, factor: NonZero<usize>) -> Self {
         self.oversampling_factor = factor.get();
         self

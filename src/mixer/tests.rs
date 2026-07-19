@@ -138,4 +138,3 @@ fn added_taking_phase_into_account() {
     assert_eq!(rx.next(), Some(-10.0)); // not yet mixed (out of phase)
     assert_eq!(rx.next(), Some(15.0)); // mixing starts
 }
-
