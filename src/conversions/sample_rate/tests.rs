@@ -229,14 +229,14 @@ fn test_sample_rate_conversions() {
     let test_cases = [
         // (from_rate, to_rate, channels, description)
         (1000, 7000, 1, "integer upsample 7x"),
-        // (2000, 3000, 2, "fractional upsample 1.5x"),
-        // (12000, 2400, 1, "integer downsample 1/5x"),
-        // (48000, 44100, 2, "fractional downsample (DVD to CD)"),
-        // (8000, 48001, 1, "async sinc"),
+        (2000, 3000, 2, "fractional upsample 1.5x"),
+        (12000, 2400, 1, "integer downsample 1/5x"),
+        (48000, 44100, 2, "fractional downsample (DVD to CD)"),
+        (8000, 48001, 1, "async sinc"),
     ];
 
     let configs: &[(&str, ResampleConfig)] = &[
-        // ("poly", ResampleConfig::poly().build()),
+        ("poly", ResampleConfig::poly().build()),
         ("sinc", ResampleConfig::sinc().build()),
     ];
 
