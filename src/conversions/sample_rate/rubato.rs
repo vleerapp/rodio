@@ -140,12 +140,12 @@ impl<I: Source, R: rubato::Resampler<Sample>> RubatoResample<I, R> {
     // This is complicated since we need to handle changing sample rates (spans)
     #[inline(never)]
     fn resample_chunk(&mut self) -> Option<()> {
-        if self.input.is_exhausted() && self.resampler_empty() {
+        let needed_by_resampler = InFrameCount(self.resampler.input_frames_next());
+        let frames_in = self.fill_input_buffer(needed_by_resampler);
+        if frames_in == InFrameCount::ZERO && self.resampler_empty(){
             return None;
         }
 
-        let needed_by_resampler = InFrameCount(self.resampler.input_frames_next());
-        let frames_in = self.fill_input_buffer(needed_by_resampler);
         self.frames_being_resampled += frames_in.resampled_by(self.resample_ratio);
         self.pos_in_current_span += frames_in.samples(self.output.channels);
 
