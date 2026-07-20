@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::{
     buffer::SamplesBuffer,
     common::{assert_error_traits, ChannelCount, SampleRate},
+    conversions::SampleRateConverter,
     math, Float, Sample,
 };
 
@@ -15,6 +16,7 @@ pub use self::agc::{AutomaticGainControl, AutomaticGainControlSettings};
 pub use self::amplify::Amplify;
 pub use self::blt::BltFilter;
 pub use self::buffered::Buffered;
+pub use self::chain::{chain, Chain};
 pub use self::channel_volume::ChannelVolume;
 pub use self::chirp::{chirp, Chirp};
 pub use self::crossfade::Crossfade;
@@ -25,7 +27,8 @@ pub use self::empty::Empty;
 pub use self::empty_callback::EmptyCallback;
 pub use self::fadein::FadeIn;
 pub use self::fadeout::FadeOut;
-pub use self::from_factory::{from_factory, FromFactoryIter};
+#[allow(deprecated)]
+pub use self::from_fn::{from_factory, from_fn, FromFactoryIter, FromFn};
 pub use self::from_iter::{from_iter, FromIter};
 pub use self::limit::{Limit, LimitSettings};
 pub use self::linear_ramp::LinearGainRamp;
@@ -47,11 +50,13 @@ pub use self::take::TakeDuration;
 pub use self::triangle::TriangleWave;
 pub use self::uniform::UniformSourceIterator;
 pub use self::zero::{Zero, ZeroError};
+pub use crate::conversions::ResampleConfig;
 
 mod agc;
 mod amplify;
 mod blt;
 mod buffered;
+mod chain;
 mod channel_volume;
 mod chirp;
 mod crossfade;
@@ -62,7 +67,7 @@ mod empty;
 mod empty_callback;
 mod fadein;
 mod fadeout;
-mod from_factory;
+mod from_fn;
 mod from_iter;
 mod limit;
 mod linear_ramp;
@@ -730,9 +735,33 @@ pub trait Source: Iterator<Item = Sample> {
         distortion::distortion(self, gain, threshold)
     }
 
-    // There is no `can_seek()` method as it is impossible to use correctly. Between
-    // checking if a source supports seeking and actually seeking the sink can
-    // switch to a new source.
+    /// Resamples this source to a different sample rate.
+    ///
+    /// See the [`sample_rate`](crate::conversions::sample_rate) module documentation for detailed
+    /// information about resampling algorithms and quality presets.
+    ///
+    /// # Quality Presets
+    ///
+    /// - **Fast**: Lower quality, lower CPU usage, lower latency
+    /// - **Balanced**: Good quality, moderate CPU usage (default)
+    /// - **Accurate**: Best quality, higher CPU usage
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rodio::SampleRate;
+    /// use rodio::source::{SineWave, Source, ResampleConfig};
+    ///
+    /// let source = SineWave::new(440.0);
+    /// let resampled = source.resample(SampleRate::new(96000).unwrap(), ResampleConfig::balanced());
+    /// ```
+    #[inline]
+    fn resample(self, target_rate: SampleRate, config: ResampleConfig) -> SampleRateConverter<Self>
+    where
+        Self: Sized,
+    {
+        SampleRateConverter::new(self, target_rate, config)
+    }
 
     /// Attempts to seek to a given position in the current source.
     ///
@@ -858,6 +887,24 @@ pub(crate) fn padding_samples_needed(
         channels.get() as usize - samples_in_current_frame
     } else {
         0
+    }
+}
+
+/// Resets span tracking state after a seek operation.
+#[inline]
+pub(crate) fn reset_seek_span_tracking(
+    samples_counted: &mut usize,
+    cached_span_len: &mut Option<usize>,
+    pos: Duration,
+    input_span_len: Option<usize>,
+) {
+    *samples_counted = 0;
+    if pos == Duration::ZERO {
+        // Set span-counting mode when seeking to start
+        *cached_span_len = input_span_len;
+    } else {
+        // Set detection mode for arbitrary positions
+        *cached_span_len = None;
     }
 }
 

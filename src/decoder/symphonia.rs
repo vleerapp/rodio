@@ -147,8 +147,9 @@ impl SymphoniaDecoder {
                 continue;
             }
 
-            let decoded = match decoder.decode(&current_span) {
-                Ok(decoded) => decoded,
+            match decoder.decode(&current_span) {
+                Ok(decoded) if decoded.frames() > 0 => break decoded,
+                Ok(_) => continue, // skip setup/header packets with no audio frames (e.g. Vorbis)
                 Err(e) => match e {
                     Error::DecodeError(_) => {
                         // Decode errors are intentionally ignored with no retry limit.
@@ -158,15 +159,6 @@ impl SymphoniaDecoder {
                     }
                     _ => return Err(e),
                 },
-            };
-
-            // Loop until we get a packet with audio frames. This is necessary because some
-            // formats can have packets with only metadata, particularly when rewinding, in
-            // which case the iterator would otherwise end with `None`.
-            // Note: checking `decoded.frames()` is more reliable than `packet.dur()`, which
-            // can resturn non-zero durations for packets without audio frames.
-            if decoded.frames() > 0 {
-                break decoded;
             }
         };
         let spec = decoded.spec().to_owned();

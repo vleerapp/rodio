@@ -1,7 +1,10 @@
 use dasp_sample::{FromSample, ToSample};
 use std::marker::PhantomData;
 
-/// Converts the samples data type to `O`.
+/// Converts each sample's numeric type to `O`.
+///
+/// Rescales the values to the target type's range (for example `i16` to `f32`), leaving the
+/// channel count and sample rate unchanged.
 #[derive(Clone, Debug)]
 pub struct SampleTypeConverter<I, O> {
     input: I,
@@ -24,7 +27,13 @@ impl<I, O> SampleTypeConverter<I, O> {
         self.input
     }
 
-    /// get mutable access to the iterator
+    /// Get immutable access to the underlying iterator.
+    #[inline]
+    pub fn inner(&self) -> &I {
+        &self.input
+    }
+
+    /// Get mutable access to the underlying iterator.
     #[inline]
     pub fn inner_mut(&mut self) -> &mut I {
         &mut self.input
