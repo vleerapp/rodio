@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Chirp` now implements `try_seek`.
 - Added `DEFAULT_SAMPLE_RATE` set to match `cpal::SAMPLE_RATE_48K`.
 - Added `Source::resample` and `ResampleConfig` for high-quality sample rate conversion.
+- Presets for `AGC`.
 
 ### Changed
 
@@ -28,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Breaking: `Zero::new_samples()` now returns `Result<Self, ZeroError>` requiring a frame-aligned number of samples.
 - Breaking: `SampleRateConverter` now wraps a `Source` instead of an `Iterator` and takes a `ResampleConfig`.
 - Improved queue, buffer, mixer and sample rate conversion performance.
+- Improved AGC algorithm, now ~25% faster and volume changes are more stable
 - Default sample rate changed from 44.1 kHz to 48 kHz consistently.
 - `open_sink_or_fallback` now tries 48 kHz and 44.1 kHz before the device's maximum sample rate.
 
