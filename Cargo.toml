@@ -165,7 +165,7 @@ tracing = { version = "0.1.44", optional = true }
 atomic_float = { version = "1.1.0", optional = true }
 rtrb = { version = "0.3.4", optional = true }
 num-rational = "0.4.2"
-
+rubato = { version = "4.0", default-features = false }
 symphonia-adapter-libopus = { version = "0.3.0", optional = true }
 
 [dev-dependencies]
