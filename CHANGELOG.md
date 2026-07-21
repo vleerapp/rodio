@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - All sources now implement `Iterator::size_hint()`.
 - `Chirp` now implements `try_seek`.
 - Added `DEFAULT_SAMPLE_RATE` set to match `cpal::SAMPLE_RATE_48K`.
+- Added `Source::resample` and `ResampleConfig` for high-quality sample rate conversion.
+- Presets for `AGC`.
 
 ### Changed
 
@@ -25,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Explicitly document the requirement for sources to return complete frames.
 - Ensured decoders to always return complete frames, as well as `TakeDuration` when expired.
 - Breaking: `Zero::new_samples()` now returns `Result<Self, ZeroError>` requiring a frame-aligned number of samples.
+- Breaking: `SampleRateConverter` now wraps a `Source` instead of an `Iterator` and takes a `ResampleConfig`.
 - Improved queue, buffer, mixer and sample rate conversion performance.
+- Improved AGC algorithm, now ~25% faster and volume changes are more stable
 - Default sample rate changed from 44.1 kHz to 48 kHz consistently.
 - `open_sink_or_fallback` now tries 48 kHz and 44.1 kHz before the device's maximum sample rate.
 
@@ -96,6 +100,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Source::dither()` function for applying dithering
 - Added `64bit` feature to opt-in to 64-bit sample precision (`f64`).
 - Added `SampleRateConverter::inner` to get underlying iterator by ref.
+- Added `Resample` source for high-quality sample rate conversion.
+- Added `FromIter` source that wraps a sample iterator.
+- Added `ChannelCountConverter::inner()` for immutable access to the underlying iterator.
+- `ChannelCountConverter` now implements `Source`.
+- Added `FromIter::{inner, inner_mut, into_inner}` accessor methods.
 
 ### Fixed
 
@@ -108,6 +117,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved precision in `SkipDuration` to avoid off-by-a-few-samples errors.
 - Fixed `Empty` source to properly report exhaustion.
 - Fixed `Zero::current_span_len` returning remaining samples instead of span length.
+
+### Deprecated
+- `SampleRateConverter` is deprecated in favor of using `Resample` with `FromIter`.
+- `FromFactoryIter` type is deprecated, renamed to `FromFn`.
+- `from_factory()` function is deprecated, renamed to `from_fn()`.
 
 ### Changed
 
@@ -130,6 +144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgraded `cpal` to v0.17.
 - Clarified `Source::current_span_len()` contract documentation.
 - Improved queue, mixer and sample rate conversion performance.
+- `SampleRateConverter` uses the new `Resample` source for better quality.
+- Renamed `FromIter` for sequencing multiple sources to `Chain`.
+- Renamed `FromFactoryIter` for generating sources from a function to `FromFn`.
 
 ## Version [0.21.1] (2025-07-14)
 

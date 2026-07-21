@@ -175,8 +175,9 @@ impl SymphoniaDecoder {
                 continue;
             }
 
-            let decoded = match decoder.decode(&packet) {
-                Ok(decoded) => decoded,
+            match decoder.decode(&current_span) {
+                Ok(decoded) if decoded.frames() > 0 => break decoded,
+                Ok(_) => continue, // skip setup/header packets with no audio frames (e.g. Vorbis)
                 Err(e) => match e {
                     Error::DecodeError(_) => {
                         // Decode errors are intentionally ignored with no retry limit.
