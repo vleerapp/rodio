@@ -175,8 +175,12 @@ impl SymphoniaDecoder {
                 continue;
             }
 
-            match decoder.decode(&current_span) {
-                Ok(decoded) if decoded.frames() > 0 => break decoded,
+            match decoder.decode(&packet) {
+                Ok(decoded) if decoded.frames() > 0 => {
+                    let spec = decoded.spec().clone();
+                    decoded.copy_to_vec_interleaved(&mut decoded_buffer);
+                    break (spec, true);
+                }
                 Ok(_) => continue, // skip setup/header packets with no audio frames (e.g. Vorbis)
                 Err(e) => match e {
                     Error::DecodeError(_) => {
@@ -188,15 +192,6 @@ impl SymphoniaDecoder {
                     _ => return Err(e),
                 },
             };
-
-            // Loop until we get a packet with audio frames. This is necessary because some
-            // formats can have packets with only metadata, particularly when rewinding, in
-            // which case the iterator would otherwise end with `None`.
-            if decoded.frames() > 0 {
-                let spec = decoded.spec().clone();
-                decoded.copy_to_vec_interleaved(&mut decoded_buffer);
-                break (spec, true);
-            }
         };
 
         if !has_decoded {
