@@ -270,7 +270,7 @@ impl<I: Source> RubatoAsyncResample<I> {
 
         let parameters = rubato::SincInterpolationParameters {
             sinc_len,
-            f_cutoff: f_cutoff as _,
+            f_cutoff: Some(f_cutoff as f32),
             oversampling_factor,
             interpolation: interpolation.into(),
             window: window.into(),
